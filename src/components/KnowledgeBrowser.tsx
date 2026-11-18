@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { getVaultAssetBlobUrl, getVaultFileText } from '../lib/githubApi';
 import {
+  buildYouTubeTimestampUrl,
   isImageAsset,
+  parseNoteSections,
   resolveAssetRepoPath,
   stripFrontmatter,
   type SearchIndexEntry,
@@ -32,6 +34,7 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
   const [tagFilter, setTagFilter] = useState('');
 
   const [activeNote, setActiveNote] = useState<SearchIndexEntry | null>(null);
+  const [detailTab, setDetailTab] = useState<'summary' | 'transcript'>('summary');
   const [noteBody, setNoteBody] = useState<string>('');
   const [noteLoading, setNoteLoading] = useState(false);
   const [assetUrls, setAssetUrls] = useState<{ path: string; url: string }[]>([]);
@@ -151,12 +154,18 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
 
   // Note Detail View
   if (activeNote) {
+    const parsed = parseNoteSections(noteBody);
+    const hasTranscript = Boolean(parsed.transcript || parsed.ocrText);
+
     return (
       <section className="space-y-4 dj-enter-right">
         <div className="flex items-center justify-between gap-2">
           <button
             type="button"
-            onClick={() => setActiveNote(null)}
+            onClick={() => {
+              setActiveNote(null);
+              setDetailTab('summary');
+            }}
             className="dj-btn px-3 text-xs"
           >
             ← 返回列表
@@ -188,47 +197,176 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
             )}
           </header>
 
-          {activeNote.user_summary && (
-            <div className="border-l-2 border-l-[#6FA88B] pl-3 py-1 bg-[rgba(111,168,139,0.06)]">
-              <div className="text-[10px] tracking-[0.14em] text-[#6FA88B] uppercase mb-1">
-                USER SUMMARY
-              </div>
-              <p className="text-xs text-[#F4F4F0] whitespace-pre-wrap">
-                {activeNote.user_summary}
-              </p>
-            </div>
-          )}
-
-          {assetUrls.length > 0 && (
-            <div className="space-y-2">
-              <div className="text-[10px] tracking-[0.14em] text-[#9A9E9C] uppercase">
-                原圖溯源（點擊放大燈箱）
-              </div>
-              <div className="grid grid-cols-1 gap-2">
-                {assetUrls.map((asset) => (
-                  <button
-                    key={asset.path}
-                    type="button"
-                    onClick={() => setLightboxUrl(asset)}
-                    className="dj-curtain-wrap border border-[rgba(255,255,255,0.14)] p-0 block w-full text-left cursor-zoom-in"
-                  >
-                    <img
-                      src={asset.url}
-                      alt={asset.path}
-                      className="dj-curtain-media is-revealed max-h-[260px] w-full object-contain bg-[#0E0F12]"
-                    />
-                  </button>
-                ))}
-              </div>
+          {/* 摘要 | 逐字稿 Sub-tabs */}
+          {hasTranscript && (
+            <div className="grid grid-cols-2 border-b border-[rgba(255,255,255,0.12)]">
+              <button
+                type="button"
+                onClick={() => setDetailTab('summary')}
+                className={`min-h-[48px] text-xs tracking-[0.14em] border-b-2 transition-colors ${
+                  detailTab === 'summary'
+                    ? 'border-[#6FA88B] text-[#F4F4F0]'
+                    : 'border-transparent text-[#6E7371]'
+                }`}
+              >
+                摘要
+              </button>
+              <button
+                type="button"
+                onClick={() => setDetailTab('transcript')}
+                className={`min-h-[48px] text-xs tracking-[0.14em] border-b-2 transition-colors ${
+                  detailTab === 'transcript'
+                    ? 'border-[#6FA88B] text-[#F4F4F0]'
+                    : 'border-transparent text-[#6E7371]'
+                }`}
+              >
+                {parsed.ocrText && !parsed.transcript ? 'OCR 原文' : '逐字稿'}
+              </button>
             </div>
           )}
 
           {noteLoading ? (
             <div className="text-xs text-[#9A9E9C] py-4">讀取私有筆記全文中...</div>
-          ) : (
-            <pre className="text-xs text-[#D4D6D4] whitespace-pre-wrap font-sans leading-relaxed break-words">
-              {noteBody}
+          ) : detailTab === 'transcript' && hasTranscript ? (
+            <pre className="text-xs text-[#D4D6D4] whitespace-pre-wrap font-sans leading-relaxed break-words dj-enter-right">
+              {parsed.transcript || parsed.ocrText}
             </pre>
+          ) : (
+            <div className="space-y-5 dj-enter-left">
+              {activeNote.user_summary && (
+                <div className="border-l-2 border-l-[#6FA88B] pl-3 py-1 bg-[rgba(111,168,139,0.06)]">
+                  <div className="text-[10px] tracking-[0.14em] text-[#6FA88B] uppercase mb-1">
+                    USER NOTE
+                  </div>
+                  <p className="text-xs text-[#F4F4F0] whitespace-pre-wrap">
+                    {activeNote.user_summary}
+                  </p>
+                </div>
+              )}
+
+              {/* KEY POINTS / 重點整理 (時間點／行號卡片) */}
+              {parsed.timelinePoints.length > 0 && (
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] tracking-[0.16em] text-[#9A9E9C] uppercase">
+                      KEY POINTS / 重點整理
+                    </span>
+                    <span className="text-[10px] dj-tnum text-[#6E7371]">
+                      {parsed.timelinePoints.length} 項
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    {parsed.timelinePoints.map((tp, idx) => {
+                      const jumpUrl = buildYouTubeTimestampUrl(activeNote.source_url, tp.location);
+                      return (
+                        <div
+                          key={`${tp.location}-${idx}`}
+                          className="p-3 bg-[#1E2025] border border-[rgba(255,255,255,0.1)] space-y-1.5"
+                        >
+                          <div className="flex items-center gap-2">
+                            {jumpUrl ? (
+                              <a
+                                href={jumpUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-[11px] dj-tnum px-2 py-0.5 bg-[rgba(111,168,139,0.18)] border border-[rgba(111,168,139,0.45)] text-[#F4F4F0]"
+                              >
+                                ▶ {tp.location}
+                              </a>
+                            ) : (
+                              <span className="text-[11px] dj-tnum px-2 py-0.5 bg-[rgba(255,255,255,0.06)] border border-[rgba(255,255,255,0.14)] text-[#6FA88B]">
+                                {tp.location}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs text-[#F4F4F0] leading-relaxed">{tp.point}</div>
+                          {tp.quote && (
+                            <div className="text-[11px] text-[#9A9E9C] border-l border-[rgba(255,255,255,0.2)] pl-2">
+                              {tp.quote}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* 重要畫面 (2 欄網格 + 點擊放大燈箱) */}
+              {assetUrls.length > 0 && (
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] tracking-[0.16em] text-[#9A9E9C] uppercase">
+                      重要畫面
+                    </span>
+                    <span className="text-[10px] dj-tnum text-[#6E7371]">
+                      {assetUrls.length} 張 · 點圖片放大
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2.5">
+                    {assetUrls.map((asset) => {
+                      const caption = parsed.imageCaptions[asset.path] || '';
+                      const [badge, desc] = caption.includes(' | ')
+                        ? caption.split(' | ', 2)
+                        : ['', caption];
+                      return (
+                        <button
+                          key={asset.path}
+                          type="button"
+                          onClick={() => setLightboxUrl(asset)}
+                          className="dj-card p-0 text-left overflow-hidden cursor-zoom-in hover:border-[rgba(255,255,255,0.36)] transition-colors flex flex-col"
+                        >
+                          <div className="dj-curtain-wrap w-full aspect-video bg-[#0E0F12]">
+                            <img
+                              src={asset.url}
+                              alt={caption || asset.path}
+                              className="dj-curtain-media is-revealed w-full h-full object-cover"
+                            />
+                          </div>
+                          {(badge || desc) && (
+                            <div className="p-2 space-y-1">
+                              {badge && (
+                                <span className="inline-block text-[10px] dj-tnum px-1.5 py-0.5 bg-[rgba(111,168,139,0.16)] border border-[rgba(111,168,139,0.4)] text-[#F4F4F0]">
+                                  ▶ {badge}
+                                </span>
+                              )}
+                              {desc && (
+                                <div className="text-[11px] text-[#D4D6D4] line-clamp-2 leading-snug">
+                                  {desc}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* AI 結構化摘要總覽 */}
+              {(parsed.summaryBullets.length > 0 || parsed.summaryParagraph) && (
+                <div className="space-y-2">
+                  <div className="text-[10px] tracking-[0.16em] text-[#9A9E9C] uppercase">
+                    AI 結構化摘要
+                  </div>
+                  {parsed.summaryBullets.length > 0 && (
+                    <ul className="space-y-1.5 text-xs text-[#D4D6D4]">
+                      {parsed.summaryBullets.map((b, i) => (
+                        <li key={i} className="leading-relaxed">
+                          · {b}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {parsed.summaryParagraph && (
+                    <p className="text-xs text-[#9A9E9C] leading-relaxed">
+                      {parsed.summaryParagraph}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
           )}
 
           {activeNote.source_url && (
