@@ -1,17 +1,113 @@
 export interface SearchIndexEntry {
   id: string;
   title: string;
-  source_type: 'screenshot' | 'article' | 'youtube' | 'ig_video' | 'podcast' | 'book' | string;
+  source_type:
+    | 'screenshot'
+    | 'article'
+    | 'youtube'
+    | 'ig_video'
+    | 'podcast'
+    | 'book'
+    | 'book_recon'
+    | 'document_ocr'
+    | string;
   status: 'completed' | 'partial_capture' | 'in_progress' | string;
   category: string;
   tags: string[];
   source_url: string;
   raw_assets: string[];
   user_summary: string;
+  one_line_summary?: string;
+  has_keyframes?: boolean;
+  has_transcript?: boolean;
+  has_fact_check?: boolean;
   created_at: string;
   path: string;
   excerpt: string;
   word_count: number;
+}
+
+export interface StructuredKeyPoint {
+  section: string;
+  point: string;
+  detail: string;
+  timestamp: string;
+}
+
+export interface StructuredKeyInfo {
+  label: string;
+  value: string;
+}
+
+export interface StructuredKeyFrame {
+  timestamp: string;
+  caption: string;
+  image_path: string;
+}
+
+export interface StructuredTranscriptLine {
+  t: string;
+  s: string;
+  x: string;
+}
+
+export interface StructuredFactCheckItem {
+  claim: string;
+  verdict: '正確' | '有爭議' | '錯誤' | '無法查證' | string;
+  reason: string;
+  sources: Array<{ title: string; url: string }>;
+}
+
+export interface StructuredPayload {
+  schema_version?: number;
+  one_line_summary?: string;
+  limited_note?: string;
+  key_points?: StructuredKeyPoint[];
+  key_info?: StructuredKeyInfo[];
+  key_frames?: StructuredKeyFrame[];
+  transcript?: StructuredTranscriptLine[];
+  fact_check?: {
+    summary?: string;
+    items?: StructuredFactCheckItem[];
+  };
+}
+
+export function extractStructuredJson(body: string): StructuredPayload | null {
+  const m = body.match(/<!--\s*DALI_STRUCTURED_JSON\s*\n([\s\S]*?)\n\s*-->/);
+  if (!m) return null;
+  try {
+    const parsed = JSON.parse(m[1].trim());
+    return parsed && typeof parsed === 'object' ? (parsed as StructuredPayload) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function formatNoteForLineShare(
+  title: string,
+  sourceUrl: string,
+  structured: StructuredPayload | null,
+  fallbackBullets: string[] = []
+): string {
+  const lines: string[] = [`📌 ${title}`];
+  if (structured?.one_line_summary) {
+    lines.push(`💡 ${structured.one_line_summary}`);
+  }
+  lines.push('');
+  const kps = structured?.key_points || [];
+  if (kps.length > 0) {
+    kps.forEach((kp, idx) => {
+      const ts = kp.timestamp ? `[${kp.timestamp}] ` : '';
+      lines.push(`${idx + 1}. ${ts}${kp.point}`);
+      if (kp.detail) lines.push(`   ↳ ${kp.detail}`);
+    });
+  } else if (fallbackBullets.length > 0) {
+    fallbackBullets.forEach((b, idx) => lines.push(`${idx + 1}. ${b}`));
+  }
+  if (sourceUrl) {
+    lines.push('', `🔗 來源：${sourceUrl}`);
+  }
+  return lines.join('\n');
 }
 
 export interface SearchIndexPayload {

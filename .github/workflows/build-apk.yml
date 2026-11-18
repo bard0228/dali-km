@@ -1,0 +1,76 @@
+name: Build Android APK & Sync to Google Drive
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "android/**"
+      - ".github/workflows/build-apk.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Taipei
+
+    steps:
+      - name: Checkout kb-pwa
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Build Release APK
+        working-directory: android
+        run: gradle assembleRelease --no-daemon
+
+      - name: Rename APK with version
+        run: |
+          APK_SRC="android/app/build/outputs/apk/release/app-release.apk"
+          APK_DEST="dali-km-v2.0.${{ github.run_number }}.apk"
+          cp "$APK_SRC" "$APK_DEST"
+          echo "APK_NAME=$APK_DEST" >> "$GITHUB_ENV"
+
+      - name: Upload APK as Workflow Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APK_NAME }}
+          path: ${{ env.APK_NAME }}
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-v2.0.${{ github.run_number }}
+          name: 大里智慧王 APK v2.0.${{ github.run_number }}
+          files: ${{ env.APK_NAME }}
+
+      - name: Sync APK to Google Drive (delete old APKs, keep only latest)
+        env:
+          RCLONE_CONF: ${{ secrets.RCLONE_CONF }}
+          GDRIVE_APP_DIR: ${{ vars.GDRIVE_APP_DIR || 'gdrive:麻糬紅豆湯/大里智慧王' }}
+        run: |
+          if [ -z "$RCLONE_CONF" ]; then
+            echo "RCLONE_CONF not set; skipping Google Drive APK upload."
+            exit 0
+          fi
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          mkdir -p ~/.config/rclone
+          printf '%s\n' "$RCLONE_CONF" > ~/.config/rclone/rclone.conf
+          echo "Removing old dali-km-*.apk files from $GDRIVE_APP_DIR ..."
+          rclone delete "$GDRIVE_APP_DIR" --include "dali-km-*.apk" --drive-use-trash=false || true
+          echo "Uploading $APK_NAME to $GDRIVE_APP_DIR ..."
+          rclone copyto "$APK_NAME" "$GDRIVE_APP_DIR/$APK_NAME"
+          rm -f ~/.config/rclone/rclone.conf

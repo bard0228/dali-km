@@ -142,6 +142,27 @@ export async function triggerIngestWorkflow(
   }
 }
 
+export async function triggerFollowWorkflow(settings: ByokSettings): Promise<void> {
+  const owner = settings.githubOwner.trim();
+  const repo = settings.githubRepo.trim();
+  const branch = settings.githubBranch.trim() || 'main';
+  const url = `${GH_API_BASE}/repos/${owner}/${repo}/actions/workflows/follow.yml/dispatches`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      ...ghHeaders(settings.githubPat),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ ref: branch }),
+  });
+
+  if (!res.ok && res.status !== 204) {
+    const errText = await res.text();
+    throw new Error(`觸發頻道追蹤失敗 (HTTP ${res.status}): ${errText.slice(0, 180)}`);
+  }
+}
+
 export async function getVaultFileText(
   settings: ByokSettings,
   repoPath: string

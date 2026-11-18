@@ -1,5 +1,7 @@
 export interface ByokSettings {
   openrouterApiKey: string;
+  geminiApiKey: string;
+  defaultDetailLevel: 'detailed' | 'concise';
   githubPat: string;
   githubOwner: string;
   githubRepo: string;
@@ -10,6 +12,8 @@ const STORAGE_KEY = 'kb_pwa_byok_settings_v1';
 
 export const DEFAULT_SETTINGS: ByokSettings = {
   openrouterApiKey: '',
+  geminiApiKey: '',
+  defaultDetailLevel: 'detailed',
   githubPat: '',
   githubOwner: '',
   githubRepo: 'dali-km-vault',
@@ -23,6 +27,8 @@ export function loadSettings(): ByokSettings {
     const parsed = JSON.parse(raw) as Partial<ByokSettings>;
     return {
       openrouterApiKey: String(parsed.openrouterApiKey ?? ''),
+      geminiApiKey: String(parsed.geminiApiKey ?? ''),
+      defaultDetailLevel: parsed.defaultDetailLevel === 'concise' ? 'concise' : 'detailed',
       githubPat: String(parsed.githubPat ?? ''),
       githubOwner: String(parsed.githubOwner ?? ''),
       githubRepo: String(parsed.githubRepo || 'dali-km-vault'),
@@ -35,6 +41,13 @@ export function loadSettings(): ByokSettings {
 
 export function saveSettings(settings: ByokSettings): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+  try {
+    const bridge = (window as unknown as { DaliNativeBridge?: { syncSettings?: (s: string) => void } })
+      .DaliNativeBridge;
+    bridge?.syncSettings?.(JSON.stringify(settings));
+  } catch {
+    // ignore when running in regular browser
+  }
 }
 
 export function clearSettings(): void {

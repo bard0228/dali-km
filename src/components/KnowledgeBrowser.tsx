@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { getVaultAssetBlobUrl, getVaultFileText } from '../lib/githubApi';
 import {
   buildYouTubeTimestampUrl,
+  extractStructuredJson,
+  formatNoteForLineShare,
   isImageAsset,
   parseNoteSections,
   resolveAssetRepoPath,
@@ -18,7 +20,29 @@ interface KnowledgeBrowserProps {
   onGoSettings: () => void;
 }
 
-const TYPE_FILTERS = ['all', 'screenshot', 'article', 'youtube', 'ig_video', 'podcast', 'book'];
+const TYPE_FILTERS = [
+  'all',
+  'youtube',
+  'ig_video',
+  'article',
+  'podcast',
+  'screenshot',
+  'document_ocr',
+  'book_recon',
+  'book',
+];
+
+const TYPE_LABEL_MAP: Record<string, string> = {
+  all: '全部',
+  youtube: 'YouTube',
+  ig_video: 'IG/短片',
+  article: '文章',
+  podcast: 'Podcast',
+  screenshot: '截圖',
+  document_ocr: '文件OCR',
+  book_recon: '搜書',
+  book: '電子書',
+};
 
 export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
   settings,
@@ -34,7 +58,14 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
   const [tagFilter, setTagFilter] = useState('');
 
   const [activeNote, setActiveNote] = useState<SearchIndexEntry | null>(null);
-  const [detailTab, setDetailTab] = useState<'summary' | 'transcript'>('summary');
+  const [detailTab, setDetailTab] = useState<'summary' | 'keyframes' | 'transcript' | 'factcheck'>('summary');
+  const [detailMode, setDetailMode] = useState<'detailed' | 'concise'>(
+    settings.defaultDetailLevel || 'detailed'
+  );
+  const [transcriptQuery, setTranscriptQuery] = useState('');
+  const [copyToast, setCopyToast] = useState<string | null>(null);
+
+  const [noteRawMd, setNoteRawMd] = useState<string>('');
   const [noteBody, setNoteBody] = useState<string>('');
   const [noteLoading, setNoteLoading] = useState(false);
   const [assetUrls, setAssetUrls] = useState<{ path: string; url: string }[]>([]);
@@ -61,35 +92,48 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
     fetchIndex();
   }, [fetchIndex]);
 
-  const openNoteDetail = useCallback(
+  useEffect(() => {
+    return () => {
+      assetUrls.forEach((a) => URL.revokeObjectURL(a.url));
+    };
+  }, [assetUrls]);
+
+  const openNote = useCallback(
     async (entry: SearchIndexEntry) => {
       setActiveNote(entry);
-      setNoteBody('');
+      setDetailTab('summary');
+      setTranscriptQuery('');
       setNoteLoading(true);
-      // Revoke old blob URLs
+      setNoteRawMd('');
+      setNoteBody('');
       setAssetUrls((prev) => {
-        prev.forEach((a) => URL.revokeObjectURL(a.url));
+        prev.forEach((p) => URL.revokeObjectURL(p.url));
         return [];
       });
 
       try {
         const md = await getVaultFileText(settings, entry.path);
+        setNoteRawMd(md);
         setNoteBody(stripFrontmatter(md));
 
-        const imgAssets = (entry.raw_assets || []).filter(isImageAsset);
+        const imagePaths = entry.raw_assets
+          .map(resolveAssetRepoPath)
+          .filter(isImageAsset);
+
         const loaded: { path: string; url: string }[] = [];
-        for (const rawRel of imgAssets) {
-          const repoPath = resolveAssetRepoPath(rawRel);
+        for (const p of imagePaths) {
           try {
-            const blobUrl = await getVaultAssetBlobUrl(settings, repoPath);
-            loaded.push({ path: repoPath, url: blobUrl });
+            const url = await getVaultAssetBlobUrl(settings, p);
+            loaded.push({ path: p, url });
           } catch {
-            // Skip unreadable asset without crashing note view
+            // Skip missing/unavailable assets gracefully
           }
         }
         setAssetUrls(loaded);
       } catch (err) {
-        setNoteBody(err instanceof Error ? `讀取失敗：${err.message}` : '讀取筆記失敗');
+        setNoteBody(
+          `讀取筆記失敗：${err instanceof Error ? err.message : '未知錯誤'}`
+        );
       } finally {
         setNoteLoading(false);
       }
@@ -97,445 +141,682 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
     [settings]
   );
 
-  // Support jumping directly from AskView citation cards
   useEffect(() => {
-    if (!selectedNoteId || !indexData?.notes) return;
+    if (!selectedNoteId || !indexData) return;
     const found = indexData.notes.find((n) => n.id === selectedNoteId);
     if (found) {
-      openNoteDetail(found);
+      openNote(found);
       onClearSelectedNote?.();
     }
-  }, [selectedNoteId, indexData, openNoteDetail, onClearSelectedNote]);
-
-  useEffect(() => {
-    return () => {
-      assetUrls.forEach((a) => URL.revokeObjectURL(a.url));
-    };
-  }, [assetUrls]);
+  }, [selectedNoteId, indexData, openNote, onClearSelectedNote]);
 
   const allTags = useMemo(() => {
     const set = new Set<string>();
-    (indexData?.notes || []).forEach((n) => (n.tags || []).forEach((t) => set.add(t)));
-    return Array.from(set).slice(0, 12);
+    indexData?.notes.forEach((n) => n.tags.forEach((t) => set.add(t)));
+    return Array.from(set).slice(0, 16);
   }, [indexData]);
 
   const filteredNotes = useMemo(() => {
-    const notes = indexData?.notes || [];
+    if (!indexData) return [];
     const q = query.trim().toLowerCase();
-    return notes.filter((n) => {
+    return indexData.notes.filter((n) => {
       if (typeFilter !== 'all' && n.source_type !== typeFilter) return false;
-      if (tagFilter && !(n.tags || []).includes(tagFilter)) return false;
+      if (tagFilter && !n.tags.includes(tagFilter)) return false;
       if (!q) return true;
       return (
         n.title.toLowerCase().includes(q) ||
         n.user_summary.toLowerCase().includes(q) ||
+        (n.one_line_summary || '').toLowerCase().includes(q) ||
         n.excerpt.toLowerCase().includes(q) ||
         n.category.toLowerCase().includes(q) ||
-        (n.tags || []).some((t) => t.toLowerCase().includes(q))
+        n.tags.some((t) => t.toLowerCase().includes(q))
       );
     });
   }, [indexData, query, typeFilter, tagFilter]);
 
+  const parsedSections = useMemo(() => parseNoteSections(noteBody), [noteBody]);
+  const structured = useMemo(() => extractStructuredJson(noteBody), [noteBody]);
+
+  const assetUrlMap = useMemo(() => {
+    const map = new Map<string, string>();
+    assetUrls.forEach((a) => map.set(a.path, a.url));
+    return map;
+  }, [assetUrls]);
+
+  const handleCopyLine = async () => {
+    if (!activeNote) return;
+    const text = formatNoteForLineShare(
+      activeNote.title,
+      activeNote.source_url,
+      structured,
+      parsedSections.summaryBullets
+    );
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopyToast('已複製 LINE 精華格式');
+      setTimeout(() => setCopyToast(null), 2000);
+    } catch {
+      setCopyToast('複製失敗，請手動選取');
+      setTimeout(() => setCopyToast(null), 2000);
+    }
+  };
+
+  const handleDownloadMd = () => {
+    if (!activeNote || !noteRawMd) return;
+    const blob = new Blob([noteRawMd], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${activeNote.id}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   if (!configured) {
     return (
-      <section className="dj-card p-5 space-y-3">
-        <div className="text-[11px] tracking-[0.16em] text-[#6E7371] dj-tnum">
-          [ 02 ] SEARCH INDEX
-        </div>
-        <div className="text-xs text-[#9A9E9C]">
-          尚未設定私有倉 `kb-vault` 憑證，無法讀取知識索引。
-        </div>
-        <button type="button" onClick={onGoSettings} className="dj-btn text-xs">
-          前往設定頁
+      <div className="dj-card p-5 space-y-3 text-center">
+        <p className="text-sm text-[#9A9E9C]">尚未設定 GitHub Vault 連線憑證。</p>
+        <button onClick={onGoSettings} className="dj-btn dj-btn-primary text-xs">
+          前往 04 設定填入憑證
         </button>
-      </section>
+      </div>
     );
   }
 
-  // Note Detail View
   if (activeNote) {
-    const parsed = parseNoteSections(noteBody);
-    const hasTranscript = Boolean(parsed.transcript || parsed.ocrText);
+    const groupedKeyPoints = (() => {
+      const kps = structured?.key_points || [];
+      const slice = detailMode === 'concise' ? kps.slice(0, 8) : kps;
+      const groups: { section: string; items: typeof kps }[] = [];
+      for (const kp of slice) {
+        const sec = kp.section || '核心重點';
+        const last = groups[groups.length - 1];
+        if (last && last.section === sec) {
+          last.items.push(kp);
+        } else {
+          groups.push({ section: sec, items: [kp] });
+        }
+      }
+      return groups;
+    })();
+
+    const keyFrames = structured?.key_frames || [];
+    const transcriptRows = structured?.transcript || [];
+    const filteredTranscript = transcriptQuery.trim()
+      ? transcriptRows.filter(
+          (r) =>
+            r.x.toLowerCase().includes(transcriptQuery.trim().toLowerCase()) ||
+            r.s.toLowerCase().includes(transcriptQuery.trim().toLowerCase())
+        )
+      : transcriptRows;
+    const factItems = structured?.fact_check?.items || [];
 
     return (
-      <section className="space-y-4 dj-enter-right">
+      <section className="space-y-4">
         <div className="flex items-center justify-between gap-2">
           <button
-            type="button"
-            onClick={() => {
-              setActiveNote(null);
-              setDetailTab('summary');
-            }}
-            className="dj-btn px-3 text-xs"
+            onClick={() => setActiveNote(null)}
+            className="text-xs tracking-[0.14em] text-[#9A9E9C] hover:text-[#F4F4F0] uppercase"
           >
-            ← 返回列表
+            ← 返回知識列表
           </button>
-          <span className="text-[11px] dj-tnum text-[#6E7371]">
-            {activeNote.source_type.toUpperCase()} / {activeNote.status}
-          </span>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={handleCopyLine}
+              className="text-[11px] px-2 py-1 border border-[#252A2C] text-[#9A9E9C] hover:border-[#6FA88B] hover:text-[#F4F4F0]"
+            >
+              📋 複製 LINE
+            </button>
+            <button
+              type="button"
+              onClick={handleDownloadMd}
+              className="text-[11px] px-2 py-1 border border-[#252A2C] text-[#9A9E9C] hover:border-[#6FA88B] hover:text-[#F4F4F0]"
+            >
+              ⬇ .md
+            </button>
+          </div>
         </div>
 
-        <article className="dj-card p-4 space-y-4">
-          <header className="border-b border-[rgba(255,255,255,0.12)] pb-3 space-y-1.5">
-            <div className="text-[11px] dj-tnum text-[#6E7371]">
-              {activeNote.created_at} · {activeNote.category}
-            </div>
-            <h2 className="dj-font-serif text-lg font-semibold text-[#F4F4F0] leading-snug">
-              {activeNote.title}
-            </h2>
-            {activeNote.tags?.length > 0 && (
-              <div className="flex flex-wrap gap-1.5 pt-1">
-                {activeNote.tags.map((t) => (
-                  <span
-                    key={t}
-                    className="text-[10px] px-2 py-0.5 border border-[rgba(255,255,255,0.14)] text-[#9A9E9C]"
-                  >
-                    #{t}
-                  </span>
-                ))}
-              </div>
-            )}
-          </header>
+        {copyToast && (
+          <div className="dj-card p-2 text-center text-xs text-[#6FA88B] border-l-2 border-l-[#6FA88B]">
+            {copyToast}
+          </div>
+        )}
 
-          {/* 摘要 | 逐字稿 Sub-tabs */}
-          {hasTranscript && (
-            <div className="grid grid-cols-2 border-b border-[rgba(255,255,255,0.12)]">
-              <button
-                type="button"
-                onClick={() => setDetailTab('summary')}
-                className={`min-h-[48px] text-xs tracking-[0.14em] border-b-2 transition-colors ${
-                  detailTab === 'summary'
-                    ? 'border-[#6FA88B] text-[#F4F4F0]'
-                    : 'border-transparent text-[#6E7371]'
-                }`}
-              >
-                摘要
-              </button>
-              <button
-                type="button"
-                onClick={() => setDetailTab('transcript')}
-                className={`min-h-[48px] text-xs tracking-[0.14em] border-b-2 transition-colors ${
-                  detailTab === 'transcript'
-                    ? 'border-[#6FA88B] text-[#F4F4F0]'
-                    : 'border-transparent text-[#6E7371]'
-                }`}
-              >
-                {parsed.ocrText && !parsed.transcript ? 'OCR 原文' : '逐字稿'}
-              </button>
+        <div className="dj-card p-4 space-y-3">
+          <div className="flex flex-wrap items-center gap-2 text-[11px] text-[#9A9E9C]">
+            <span className="px-2 py-0.5 border border-[#252A2C] uppercase">
+              {TYPE_LABEL_MAP[activeNote.source_type] || activeNote.source_type}
+            </span>
+            <span className="px-2 py-0.5 border border-[#252A2C] text-[#6FA88B]">
+              {activeNote.category}
+            </span>
+            <span>{activeNote.created_at.slice(0, 10)}</span>
+          </div>
+
+          <h2 className="text-base font-medium text-[#F4F4F0] leading-snug">
+            {activeNote.title}
+          </h2>
+
+          {structured?.one_line_summary && (
+            <div className="p-2.5 bg-[#6FA88B]/10 border-l-2 border-l-[#6FA88B] text-xs text-[#E8ECEA] leading-relaxed">
+              💡 {structured.one_line_summary}
             </div>
           )}
 
-          {noteLoading ? (
-            <div className="text-xs text-[#9A9E9C] py-4">讀取私有筆記全文中...</div>
-          ) : detailTab === 'transcript' && hasTranscript ? (
-            <pre className="text-xs text-[#D4D6D4] whitespace-pre-wrap font-sans leading-relaxed break-words dj-enter-right">
-              {parsed.transcript || parsed.ocrText}
-            </pre>
-          ) : (
-            <div className="space-y-5 dj-enter-left">
-              {activeNote.user_summary && (
-                <div className="border-l-2 border-l-[#6FA88B] pl-3 py-1 bg-[rgba(111,168,139,0.06)]">
-                  <div className="text-[10px] tracking-[0.14em] text-[#6FA88B] uppercase mb-1">
-                    USER NOTE
-                  </div>
-                  <p className="text-xs text-[#F4F4F0] whitespace-pre-wrap">
-                    {activeNote.user_summary}
-                  </p>
-                </div>
-              )}
-
-              {/* KEY POINTS / 重點整理 (時間點／行號卡片) */}
-              {parsed.timelinePoints.length > 0 && (
-                <div className="space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] tracking-[0.16em] text-[#9A9E9C] uppercase">
-                      KEY POINTS / 重點整理
-                    </span>
-                    <span className="text-[10px] dj-tnum text-[#6E7371]">
-                      {parsed.timelinePoints.length} 項
-                    </span>
-                  </div>
-                  <div className="space-y-2">
-                    {parsed.timelinePoints.map((tp, idx) => {
-                      const jumpUrl = buildYouTubeTimestampUrl(activeNote.source_url, tp.location);
-                      return (
-                        <div
-                          key={`${tp.location}-${idx}`}
-                          className="p-3 bg-[#1E2025] border border-[rgba(255,255,255,0.1)] space-y-1.5"
-                        >
-                          <div className="flex items-center gap-2">
-                            {jumpUrl ? (
-                              <a
-                                href={jumpUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="text-[11px] dj-tnum px-2 py-0.5 bg-[rgba(111,168,139,0.18)] border border-[rgba(111,168,139,0.45)] text-[#F4F4F0]"
-                              >
-                                ▶ {tp.location}
-                              </a>
-                            ) : (
-                              <span className="text-[11px] dj-tnum px-2 py-0.5 bg-[rgba(255,255,255,0.06)] border border-[rgba(255,255,255,0.14)] text-[#6FA88B]">
-                                {tp.location}
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-xs text-[#F4F4F0] leading-relaxed">{tp.point}</div>
-                          {tp.quote && (
-                            <div className="text-[11px] text-[#9A9E9C] border-l border-[rgba(255,255,255,0.2)] pl-2">
-                              {tp.quote}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* 重要畫面 (2 欄網格 + 點擊放大燈箱) */}
-              {assetUrls.length > 0 && (
-                <div className="space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] tracking-[0.16em] text-[#9A9E9C] uppercase">
-                      重要畫面
-                    </span>
-                    <span className="text-[10px] dj-tnum text-[#6E7371]">
-                      {assetUrls.length} 張 · 點圖片放大
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2.5">
-                    {assetUrls.map((asset) => {
-                      const caption = parsed.imageCaptions[asset.path] || '';
-                      const [badge, desc] = caption.includes(' | ')
-                        ? caption.split(' | ', 2)
-                        : ['', caption];
-                      return (
-                        <button
-                          key={asset.path}
-                          type="button"
-                          onClick={() => setLightboxUrl(asset)}
-                          className="dj-card p-0 text-left overflow-hidden cursor-zoom-in hover:border-[rgba(255,255,255,0.36)] transition-colors flex flex-col"
-                        >
-                          <div className="dj-curtain-wrap w-full aspect-video bg-[#0E0F12]">
-                            <img
-                              src={asset.url}
-                              alt={caption || asset.path}
-                              className="dj-curtain-media is-revealed w-full h-full object-cover"
-                            />
-                          </div>
-                          {(badge || desc) && (
-                            <div className="p-2 space-y-1">
-                              {badge && (
-                                <span className="inline-block text-[10px] dj-tnum px-1.5 py-0.5 bg-[rgba(111,168,139,0.16)] border border-[rgba(111,168,139,0.4)] text-[#F4F4F0]">
-                                  ▶ {badge}
-                                </span>
-                              )}
-                              {desc && (
-                                <div className="text-[11px] text-[#D4D6D4] line-clamp-2 leading-snug">
-                                  {desc}
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* AI 結構化摘要總覽 */}
-              {(parsed.summaryBullets.length > 0 || parsed.summaryParagraph) && (
-                <div className="space-y-2">
-                  <div className="text-[10px] tracking-[0.16em] text-[#9A9E9C] uppercase">
-                    AI 結構化摘要
-                  </div>
-                  {parsed.summaryBullets.length > 0 && (
-                    <ul className="space-y-1.5 text-xs text-[#D4D6D4]">
-                      {parsed.summaryBullets.map((b, i) => (
-                        <li key={i} className="leading-relaxed">
-                          · {b}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                  {parsed.summaryParagraph && (
-                    <p className="text-xs text-[#9A9E9C] leading-relaxed">
-                      {parsed.summaryParagraph}
-                    </p>
-                  )}
-                </div>
-              )}
+          {structured?.limited_note && (
+            <div className="p-2.5 bg-[#D4A67A]/10 border-l-2 border-l-[#D4A67A] text-xs text-[#E8D5C4] leading-relaxed">
+              ⚠️ {structured.limited_note}
             </div>
           )}
 
           {activeNote.source_url && (
-            <div className="pt-2 border-t border-[rgba(255,255,255,0.12)]">
-              <a
-                href={activeNote.source_url}
-                target="_blank"
-                rel="noreferrer"
-                className="text-xs text-[#6FA88B] underline break-all"
-              >
-                {activeNote.source_url}
-              </a>
+            <a
+              href={activeNote.source_url}
+              target="_blank"
+              rel="noreferrer"
+              className="block text-xs text-[#6FA88B] underline truncate"
+            >
+              {activeNote.source_url}
+            </a>
+          )}
+
+          {activeNote.user_summary && (
+            <div className="p-3 bg-[#0B0D0F] border-l-2 border-l-[#6FA88B]">
+              <div className="text-[10px] tracking-[0.14em] text-[#6FA88B] uppercase mb-1">
+                使用者初步重點（置頂保留）
+              </div>
+              <p className="text-xs text-[#F4F4F0] whitespace-pre-wrap leading-relaxed">
+                {activeNote.user_summary}
+              </p>
             </div>
           )}
-        </article>
 
-        {/* Fullscreen Lightbox */}
+          {/* 四分頁切換 */}
+          <div className="grid grid-cols-4 border-b border-[#252A2C] pt-1 text-[11px]">
+            {[
+              { id: 'summary' as const, label: '重點整理' },
+              {
+                id: 'keyframes' as const,
+                label: `重點畫面${keyFrames.length || assetUrls.length ? ` (${keyFrames.length || assetUrls.length})` : ''}`,
+              },
+              { id: 'transcript' as const, label: '逐字稿' },
+              {
+                id: 'factcheck' as const,
+                label: `事實查核${factItems.length ? ` (${factItems.length})` : ''}`,
+              },
+            ].map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setDetailTab(t.id)}
+                className={`py-2 text-center border-b-2 transition-colors truncate px-1 ${
+                  detailTab === t.id
+                    ? 'border-[#6FA88B] text-[#F4F4F0]'
+                    : 'border-transparent text-[#9A9E9C]'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          {noteLoading ? (
+            <div className="text-xs text-[#9A9E9C] py-6 text-center">載入筆記中...</div>
+          ) : detailTab === 'summary' ? (
+            <div className="space-y-4">
+              {structured?.key_points && structured.key_points.length > 0 ? (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-[10px] tracking-[0.14em] text-[#9A9E9C] uppercase">
+                      AI 結構化重點（共 {structured.key_points.length} 條）
+                    </div>
+                    <div className="flex border border-[#252A2C] text-[10px]">
+                      <button
+                        type="button"
+                        onClick={() => setDetailMode('detailed')}
+                        className={`px-2 py-0.5 ${
+                          detailMode === 'detailed'
+                            ? 'bg-[#6FA88B]/20 text-[#F4F4F0]'
+                            : 'text-[#9A9E9C]'
+                        }`}
+                      >
+                        詳細
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDetailMode('concise')}
+                        className={`px-2 py-0.5 ${
+                          detailMode === 'concise'
+                            ? 'bg-[#6FA88B]/20 text-[#F4F4F0]'
+                            : 'text-[#9A9E9C]'
+                        }`}
+                      >
+                        精簡
+                      </button>
+                    </div>
+                  </div>
+
+                  {groupedKeyPoints.map((grp, gIdx) => (
+                    <div key={gIdx} className="space-y-1.5">
+                      <div className="text-[11px] font-medium text-[#6FA88B] tracking-wide border-b border-[#252A2C] pb-1">
+                        {grp.section}
+                      </div>
+                      <ul className="space-y-2">
+                        {grp.items.map((kp, idx) => {
+                          const jumpUrl = kp.timestamp
+                            ? buildYouTubeTimestampUrl(activeNote.source_url, kp.timestamp)
+                            : null;
+                          return (
+                            <li key={idx} className="p-2.5 bg-[#0B0D0F] border border-[#1E2224] space-y-1">
+                              <div className="flex items-start gap-2">
+                                {kp.timestamp &&
+                                  (jumpUrl ? (
+                                    <a
+                                      href={jumpUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="shrink-0 px-1.5 py-0.5 text-[10px] bg-[#16261E] border border-[#253B30] text-[#6FA88B] hover:underline"
+                                    >
+                                      {kp.timestamp}
+                                    </a>
+                                  ) : (
+                                    <span className="shrink-0 px-1.5 py-0.5 text-[10px] bg-[#16261E] border border-[#253B30] text-[#6FA88B]">
+                                      {kp.timestamp}
+                                    </span>
+                                  ))}
+                                <span className="text-xs font-medium text-[#F4F4F0] leading-snug">
+                                  {kp.point}
+                                </span>
+                              </div>
+                              {detailMode === 'detailed' && kp.detail && (
+                                <p className="text-[11px] text-[#9A9E9C] leading-relaxed pl-1">
+                                  {kp.detail}
+                                </p>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  ))}
+
+                  {structured.key_info && structured.key_info.length > 0 && (
+                    <div className="space-y-1.5 pt-1">
+                      <div className="text-[10px] tracking-[0.14em] text-[#9A9E9C] uppercase">
+                        關鍵資訊與數據
+                      </div>
+                      <div className="grid grid-cols-1 gap-1.5">
+                        {structured.key_info.map((ki, idx) => (
+                          <div
+                            key={idx}
+                            className="flex items-baseline justify-between gap-2 p-2 bg-[#0B0D0F] border border-[#1E2224] text-xs"
+                          >
+                            <span className="text-[#6FA88B] shrink-0">{ki.label}</span>
+                            <span className="text-[#D4D6D4] text-right">{ki.value}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <>
+                  {/* 舊版筆記相容渲染 */}
+                  {parsedSections.summaryBullets.length > 0 && (
+                    <div className="space-y-1.5">
+                      <div className="text-[10px] tracking-[0.14em] text-[#9A9E9C] uppercase">
+                        AI 結構化重點
+                      </div>
+                      <ul className="space-y-1.5 text-xs text-[#E2E4E2] leading-relaxed">
+                        {parsedSections.summaryBullets.map((b, idx) => (
+                          <li key={idx} className="flex gap-2">
+                            <span className="text-[#6FA88B]">—</span>
+                            <span>{b}</span>
+                          </li>
+                        ))}
+                      </ul>
+                      {parsedSections.summaryParagraph && (
+                        <p className="text-xs text-[#B8BCB9] leading-relaxed pt-1">
+                          {parsedSections.summaryParagraph}
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  {parsedSections.timelinePoints.length > 0 && (
+                    <div className="space-y-2">
+                      <div className="text-[10px] tracking-[0.14em] text-[#9A9E9C] uppercase">
+                        時間點／段落詳細重點
+                      </div>
+                      <div className="space-y-2">
+                        {parsedSections.timelinePoints.map((tp, idx) => {
+                          const jumpUrl = buildYouTubeTimestampUrl(
+                            activeNote.source_url,
+                            tp.location
+                          );
+                          return (
+                            <div
+                              key={idx}
+                              className="p-2.5 bg-[#0B0D0F] border border-[#1E2224] space-y-1"
+                            >
+                              <div className="flex items-center gap-2">
+                                {jumpUrl ? (
+                                  <a
+                                    href={jumpUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="px-1.5 py-0.5 text-[10px] bg-[#16261E] border border-[#253B30] text-[#6FA88B] hover:underline"
+                                  >
+                                    {tp.location} ↗
+                                  </a>
+                                ) : (
+                                  <span className="px-1.5 py-0.5 text-[10px] bg-[#16261E] border border-[#253B30] text-[#6FA88B]">
+                                    {tp.location}
+                                  </span>
+                                )}
+                                <span className="text-xs text-[#F4F4F0]">{tp.point}</span>
+                              </div>
+                              {tp.quote && (
+                                <p className="text-[11px] text-[#9A9E9C] italic pl-1">
+                                  「{tp.quote}」
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          ) : detailTab === 'keyframes' ? (
+            <div className="space-y-3">
+              {keyFrames.length > 0 ? (
+                <div className="grid grid-cols-1 gap-3">
+                  {keyFrames.map((kf, idx) => {
+                    const repoPath = resolveAssetRepoPath(kf.image_path);
+                    const blobUrl = assetUrlMap.get(repoPath);
+                    return (
+                      <div
+                        key={idx}
+                        className="border border-[#252A2C] bg-[#0B0D0F] overflow-hidden"
+                      >
+                        {blobUrl ? (
+                          <button
+                            type="button"
+                            onClick={() => setLightboxUrl({ path: repoPath, url: blobUrl })}
+                            className="w-full text-left"
+                          >
+                            <img
+                              src={blobUrl}
+                              alt={kf.caption || kf.timestamp}
+                              className="w-full h-44 object-cover"
+                            />
+                          </button>
+                        ) : (
+                          <div className="h-24 flex items-center justify-center text-[11px] text-[#6A6E6C]">
+                            圖片載入中或路徑未同步（{repoPath}）
+                          </div>
+                        )}
+                        <div className="p-2.5 flex items-start gap-2">
+                          <span className="shrink-0 px-1.5 py-0.5 text-[10px] bg-[#16261E] border border-[#253B30] text-[#6FA88B]">
+                            {kf.timestamp}
+                          </span>
+                          <span className="text-xs text-[#E2E4E2] leading-snug">
+                            {kf.caption}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : assetUrls.length > 0 ? (
+                <div className="grid grid-cols-2 gap-2">
+                  {assetUrls.map((a) => (
+                    <button
+                      key={a.path}
+                      type="button"
+                      onClick={() => setLightboxUrl(a)}
+                      className="text-left border border-[#252A2C] bg-[#0B0D0F] overflow-hidden hover:border-[#6FA88B]"
+                    >
+                      <img
+                        src={a.url}
+                        alt={parsedSections.imageCaptions[a.path] || a.path}
+                        className="w-full h-28 object-cover"
+                      />
+                      <div className="p-1.5 text-[10px] text-[#9A9E9C] truncate">
+                        {parsedSections.imageCaptions[a.path] || a.path.split('/').pop()}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-xs text-[#9A9E9C] py-6 text-center">
+                  此筆記尚無擷取重點畫面。
+                </div>
+              )}
+            </div>
+          ) : detailTab === 'transcript' ? (
+            <div className="space-y-3">
+              {transcriptRows.length > 0 ? (
+                <>
+                  <input
+                    type="text"
+                    value={transcriptQuery}
+                    onChange={(e) => setTranscriptQuery(e.target.value)}
+                    placeholder="搜尋逐字稿關鍵字..."
+                    className="dj-input text-xs"
+                  />
+                  <div className="space-y-2 max-h-[55vh] overflow-y-auto pr-1">
+                    {filteredTranscript.map((row, idx) => (
+                      <div key={idx} className="text-xs leading-relaxed text-[#D4D6D4] flex gap-2">
+                        {row.t && (
+                          <span className="shrink-0 text-[10px] text-[#6FA88B] font-mono pt-0.5">
+                            {row.t}
+                          </span>
+                        )}
+                        <div>
+                          {row.s && <span className="text-[#F4F4F0] font-medium">{row.s}：</span>}
+                          <span>{row.x}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <pre className="text-xs text-[#D4D6D4] whitespace-pre-wrap font-sans leading-relaxed max-h-[55vh] overflow-y-auto">
+                  {parsedSections.transcript ||
+                    parsedSections.ocrText ||
+                    '此筆記無逐字稿或 OCR 原文。'}
+                </pre>
+              )}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {structured?.fact_check?.summary && (
+                <div className="p-2.5 bg-[#0B0D0F] border-l-2 border-l-[#6FA88B] text-xs text-[#E2E4E2]">
+                  {structured.fact_check.summary}
+                </div>
+              )}
+              {factItems.length > 0 ? (
+                <div className="space-y-2.5">
+                  {factItems.map((fc, idx) => {
+                    const badgeCls =
+                      fc.verdict === '正確'
+                        ? 'border-[#6FA88B] text-[#6FA88B] bg-[#6FA88B]/10'
+                        : fc.verdict === '錯誤'
+                        ? 'border-[#D47A7A] text-[#D47A7A] bg-[#D47A7A]/10'
+                        : fc.verdict === '有爭議'
+                        ? 'border-[#D4A67A] text-[#D4A67A] bg-[#D4A67A]/10'
+                        : 'border-[#555B59] text-[#9A9E9C]';
+                    return (
+                      <div key={idx} className="p-3 bg-[#0B0D0F] border border-[#1E2224] space-y-1.5">
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="text-xs font-medium text-[#F4F4F0] leading-snug">
+                            {fc.claim}
+                          </span>
+                          <span className={`shrink-0 px-1.5 py-0.5 text-[10px] border ${badgeCls}`}>
+                            {fc.verdict}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-[#9A9E9C] leading-relaxed">{fc.reason}</p>
+                        {fc.sources && fc.sources.length > 0 && (
+                          <div className="flex flex-wrap gap-2 pt-0.5">
+                            {fc.sources.map((src, sIdx) => (
+                              <a
+                                key={sIdx}
+                                href={src.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-[10px] text-[#6FA88B] underline truncate max-w-[200px]"
+                              >
+                                🔗 {src.title || src.url}
+                              </a>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="text-xs text-[#9A9E9C] py-6 text-center">
+                  此筆記尚未進行 Google Search 事實查核（需設定 Gemini API Key）。
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
         {lightboxUrl && (
           <div
-            role="dialog"
-            aria-modal="true"
-            className="fixed inset-0 z-50 bg-[rgba(10,11,14,0.94)] backdrop-blur-md flex flex-col p-4 safe-top safe-bottom"
+            onClick={() => setLightboxUrl(null)}
+            className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4"
           >
-            <div className="flex items-center justify-between gap-2 pb-3">
-              <span className="text-[11px] dj-tnum text-[#9A9E9C] truncate">
-                {lightboxUrl.path}
-              </span>
-              <button
-                type="button"
-                onClick={() => setLightboxUrl(null)}
-                className="dj-btn px-4 text-xs shrink-0"
-              >
-                關閉 ✕
-              </button>
-            </div>
-            <div
-              className="flex-1 flex items-center justify-center overflow-auto"
-              onClick={() => setLightboxUrl(null)}
-            >
-              <img
-                src={lightboxUrl.url}
-                alt={lightboxUrl.path}
-                className="max-w-full max-h-full object-contain"
-              />
-            </div>
+            <img
+              src={lightboxUrl.url}
+              alt={lightboxUrl.path}
+              className="max-w-full max-h-[82vh] object-contain border border-[#252A2C]"
+            />
+            <p className="mt-2 text-[11px] text-[#9A9E9C]">點擊任意處關閉預覽</p>
           </div>
         )}
       </section>
     );
   }
 
-  // List & Search View
   return (
     <section className="space-y-4">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[11px] tracking-[0.16em] text-[#9A9E9C] uppercase">
-          [ 02 ] SEARCH INDEX
-        </span>
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="搜尋標題、備忘、標籤或內文..."
+          className="dj-input flex-1"
+        />
         <button
-          type="button"
           onClick={fetchIndex}
           disabled={loading}
-          className="dj-btn px-3 text-xs min-h-[48px]"
+          className="dj-btn px-3 text-xs shrink-0"
         >
-          {loading ? '同步中...' : `重新整理 (${indexData?.total ?? 0})`}
+          {loading ? '...' : '重整'}
         </button>
       </div>
 
-      <input
-        type="search"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        placeholder="搜尋標題、初步重點、標籤或內文..."
-        className="dj-input"
-      />
-
       <div className="flex gap-1.5 overflow-x-auto pb-1">
-        {TYPE_FILTERS.map((tp) => {
-          const active = typeFilter === tp;
-          return (
-            <button
-              key={tp}
-              type="button"
-              onClick={() => setTypeFilter(tp)}
-              className={`dj-btn px-3 text-[11px] shrink-0 ${
-                active ? 'dj-btn-primary text-[#F4F4F0]' : 'text-[#9A9E9C]'
-              }`}
-            >
-              {tp === 'all' ? '全部' : tp}
-            </button>
-          );
-        })}
+        {TYPE_FILTERS.map((tp) => (
+          <button
+            key={tp}
+            type="button"
+            onClick={() => setTypeFilter(tp)}
+            className={`px-2.5 py-1 text-[11px] border shrink-0 transition-colors ${
+              typeFilter === tp
+                ? 'border-[#6FA88B] bg-[#6FA88B]/15 text-[#F4F4F0]'
+                : 'border-[#252A2C] bg-[#0B0D0F] text-[#9A9E9C]'
+            }`}
+          >
+            {TYPE_LABEL_MAP[tp] || tp}
+          </button>
+        ))}
       </div>
 
       {allTags.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
-          {allTags.map((tag) => {
-            const active = tagFilter === tag;
-            return (
-              <button
-                key={tag}
-                type="button"
-                onClick={() => setTagFilter(active ? '' : tag)}
-                className={`text-[11px] px-2.5 py-1.5 border transition-colors ${
-                  active
-                    ? 'border-[#6FA88B] text-[#F4F4F0] bg-[rgba(111,168,139,0.16)]'
-                    : 'border-[rgba(255,255,255,0.14)] text-[#9A9E9C]'
-                }`}
-              >
-                #{tag}
-              </button>
-            );
-          })}
+          {tagFilter && (
+            <button
+              type="button"
+              onClick={() => setTagFilter('')}
+              className="px-2 py-0.5 text-[10px] border border-[#D47A7A] text-[#D47A7A]"
+            >
+              清除 #{tagFilter} ×
+            </button>
+          )}
+          {allTags.map((tag) => (
+            <button
+              key={tag}
+              type="button"
+              onClick={() => setTagFilter(tag === tagFilter ? '' : tag)}
+              className={`px-2 py-0.5 text-[10px] border transition-colors ${
+                tagFilter === tag
+                  ? 'border-[#6FA88B] text-[#6FA88B]'
+                  : 'border-[#252A2C] text-[#9A9E9C]'
+              }`}
+            >
+              #{tag}
+            </button>
+          ))}
         </div>
       )}
 
       {error && (
-        <div className="dj-card p-3 border-l-2 border-l-[#D47A7A] text-xs text-[#F4F4F0]">
+        <div className="dj-card p-3 border-l-2 border-l-[#D47A7A] text-xs text-[#D47A7A]">
           {error}
         </div>
       )}
 
-      <div className="space-y-2.5">
-        {filteredNotes.length === 0 && !loading && (
-          <div className="dj-card p-5 text-xs text-[#9A9E9C]">
-            沒有符合條件的知識筆記。
-          </div>
-        )}
-
-        {filteredNotes.map((note, idx) => (
-          <button
-            key={note.id}
-            type="button"
-            onClick={() => openNoteDetail(note)}
-            className="dj-card w-full text-left p-4 hover:border-[rgba(255,255,255,0.36)] transition-colors space-y-1.5 block"
-          >
-            <div className="flex items-center justify-between text-[10px] dj-tnum text-[#6E7371]">
-              <span>
-                [ {String(idx + 1).padStart(2, '0')} ] {note.source_type.toUpperCase()} · {note.category}
-              </span>
-              <span>{note.created_at.slice(0, 10)}</span>
-            </div>
-            <div className="dj-font-serif text-[15px] font-semibold text-[#F4F4F0] leading-snug">
-              {note.title}
-            </div>
-            {note.user_summary && (
-              <p className="text-xs text-[#6FA88B] line-clamp-2">{note.user_summary}</p>
-            )}
-            <p className="text-xs text-[#9A9E9C] line-clamp-2">{note.excerpt}</p>
-            <div className="flex items-center justify-between pt-1">
-              <div className="flex flex-wrap gap-1">
-                {(note.tags || []).slice(0, 4).map((t) => (
-                  <span
-                    key={t}
-                    className="text-[10px] px-1.5 py-0.5 border border-[rgba(255,255,255,0.12)] text-[#9A9E9C]"
-                  >
-                    #{t}
-                  </span>
-                ))}
-              </div>
-              {note.raw_assets?.length > 0 && (
-                <span className="text-[10px] dj-tnum text-[#9A9E9C]">
-                  [{note.raw_assets.length} 附件]
+      {!loading && filteredNotes.length === 0 ? (
+        <div className="dj-card p-6 text-center text-xs text-[#9A9E9C]">
+          目前沒有符合條件的知識筆記。
+        </div>
+      ) : (
+        <div className="space-y-2.5">
+          {filteredNotes.map((n) => (
+            <button
+              key={n.id}
+              type="button"
+              onClick={() => openNote(n)}
+              className="dj-card w-full text-left p-3.5 hover:border-[#6FA88B] transition-colors space-y-1.5"
+            >
+              <div className="flex items-center justify-between gap-2 text-[10px] text-[#9A9E9C]">
+                <span className="uppercase tracking-wider">
+                  {TYPE_LABEL_MAP[n.source_type] || n.source_type} · {n.category}
                 </span>
+                <span>{n.created_at.slice(0, 10)}</span>
+              </div>
+              <div className="text-sm font-medium text-[#F4F4F0] leading-snug">
+                {n.title}
+              </div>
+              {(n.one_line_summary || n.user_summary) && (
+                <p className="text-xs text-[#6FA88B] line-clamp-2">
+                  {n.one_line_summary || `「${n.user_summary}」`}
+                </p>
               )}
-            </div>
-          </button>
-        ))}
-      </div>
+              <p className="text-xs text-[#9A9E9C] line-clamp-2">{n.excerpt}</p>
+              {(n.has_keyframes || n.has_transcript || n.has_fact_check) && (
+                <div className="flex flex-wrap gap-1.5 pt-0.5 text-[10px] text-[#9A9E9C]">
+                  {n.has_keyframes && <span className="px-1.5 py-0.5 border border-[#252A2C]">🖼 重點畫面</span>}
+                  {n.has_transcript && <span className="px-1.5 py-0.5 border border-[#252A2C]">📝 逐字稿</span>}
+                  {n.has_fact_check && <span className="px-1.5 py-0.5 border border-[#252A2C]">✅ 事實查核</span>}
+                </div>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
     </section>
   );
 };
