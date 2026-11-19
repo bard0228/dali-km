@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import type { FloatingProgressPayload } from '../App';
 import {
   getVaultFileText,
   triggerFollowWorkflow,
@@ -38,6 +39,7 @@ interface QuickInboxProps {
   settings: ByokSettings;
   onGoSettings: () => void;
   onAnalysisComplete?: () => void;
+  onFloatingStatus?: (payload: FloatingProgressPayload | null) => void;
 }
 
 const SOURCE_OPTIONS: { id: SourceKind; label: string }[] = [
@@ -103,6 +105,7 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({
   settings,
   onGoSettings,
   onAnalysisComplete,
+  onFloatingStatus,
 }) => {
   const [sourceType, setSourceType] = useState<SourceKind>('smart_url');
   const [sourceUrl, setSourceUrl] = useState('');
@@ -115,7 +118,7 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({
     settings.defaultDetailLevel || 'detailed'
   );
   const [files, setFiles] = useState<File[]>([]);
-  const [nativeProgress, setNativeProgress] = useState<NativeProgressEvent | null>(null);
+  const [, setNativeProgress] = useState<NativeProgressEvent | null>(null);
   const [nativeFailedUrl, setNativeFailedUrl] = useState<string | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
@@ -127,6 +130,9 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({
   const activeNativeUrlRef = useRef<string>('');
   const onAnalysisCompleteRef = useRef(onAnalysisComplete);
   onAnalysisCompleteRef.current = onAnalysisComplete;
+  const onFloatingStatusRef = useRef(onFloatingStatus);
+  onFloatingStatusRef.current = onFloatingStatus;
+  const handleCancelRef = useRef<() => void>(() => {});
 
   // Follow channel state
   const [channels, setChannels] = useState<FollowedChannel[]>([]);
@@ -152,7 +158,9 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({
         setNativeFailedUrl(null);
         setNativeProgress(null);
         setSubmitting(false);
-        setResult({ ok: true, text: ev.message || '手機端解析與知識庫同步完成！' });
+        const msg = ev.message || '手機端解析與知識庫同步完成！';
+        setResult({ ok: true, text: msg });
+        onFloatingStatusRef.current?.({ kind: 'success', message: msg });
         onAnalysisCompleteRef.current?.();
       } else if (ev.stage === 'cancelled') {
         activeNativeRef.current = false;
@@ -160,15 +168,25 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({
         setNativeFailedUrl(null);
         setNativeProgress(null);
         setSubmitting(false);
-        setResult({ ok: false, text: ev.message || '已手動停止分析。' });
+        const msg = ev.message || '已手動停止分析。';
+        setResult({ ok: false, text: msg });
+        onFloatingStatusRef.current?.({ kind: 'error', message: msg });
       } else if (ev.stage === 'error') {
         activeNativeRef.current = false;
         setNativeFailedUrl(activeNativeUrlRef.current || null);
         setNativeProgress(null);
         setSubmitting(false);
-        setResult({ ok: false, text: ev.message || '手機端解析失敗' });
+        const msg = ev.message || '手機端解析失敗';
+        setResult({ ok: false, text: msg });
+        onFloatingStatusRef.current?.({ kind: 'error', message: msg });
       } else {
         setNativeProgress(ev);
+        onFloatingStatusRef.current?.({
+          kind: 'progress',
+          stage: ev.stage,
+          message: ev.message,
+          onCancel: () => handleCancelRef.current(),
+        });
       }
     };
     window.onDaliNativeShared = (payload) => {
@@ -279,6 +297,7 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({
     setSubmitting(false);
     setResult({ ok: false, text: '已手動停止分析。' });
   };
+  handleCancelRef.current = handleCancelAnalysis;
 
   const handlePasteUrl = async () => {
     try {
@@ -393,6 +412,12 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({
       setSubmitting(true);
       setResult(null);
       setNativeProgress({ stage: 'fetching', message: '正在喚起手機端原生擷取引擎...' });
+      onFloatingStatusRef.current?.({
+        kind: 'progress',
+        stage: 'fetching',
+        message: '正在喚起手機端原生擷取引擎...',
+        onCancel: () => handleCancelRef.current(),
+      });
       try {
         window.DaliNativeBridge?.syncSettings?.(JSON.stringify(settings));
       } catch {
@@ -879,15 +904,6 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({
               className="dj-input text-xs"
             />
           </div>
-
-          {nativeProgress && (
-            <div className="dj-card p-3 border-l-2 border-l-[#6FA88B] text-xs space-y-1">
-              <div className="text-[#6FA88B] font-medium uppercase text-[10px]">
-                手機端進度 · {nativeProgress.stage}
-              </div>
-              <div className="text-[#F4F4F0]">{nativeProgress.message}</div>
-            </div>
-          )}
 
           {batchLogs.length > 0 && (
             <div className="dj-card p-3 text-[11px] text-[#9A9E9C] space-y-1 max-h-28 overflow-y-auto">

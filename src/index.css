@@ -272,3 +272,34 @@ body {
 .safe-bottom {
   padding-bottom: max(12px, env(safe-area-inset-bottom));
 }
+
+/* 懸浮通知：由上往下跳出 / 由下往上跳回 */
+.dj-toast-enter {
+  animation: djToastSlideDown 0.34s var(--dj-ease-expo) forwards;
+}
+
+.dj-toast-exit {
+  animation: djToastSlideUp 0.3s var(--dj-ease-expo) forwards;
+}
+
+@keyframes djToastSlideDown {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, -110%, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+@keyframes djToastSlideUp {
+  0% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(0, -115%, 0);
+  }
+}

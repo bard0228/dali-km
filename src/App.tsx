@@ -9,6 +9,13 @@ import { loadSettings, type ByokSettings } from './lib/storage';
 
 type TabKey = 'inbox' | 'browse' | 'ask' | 'settings';
 
+export interface FloatingProgressPayload {
+  kind: 'progress' | 'success' | 'error';
+  stage?: string;
+  message: string;
+  onCancel?: () => void;
+}
+
 const TABS: { key: TabKey; code: string; label: string }[] = [
   { key: 'inbox', code: '01', label: '投遞' },
   { key: 'browse', code: '02', label: '檢索' },
@@ -22,9 +29,66 @@ export const App: React.FC = () => {
   const [settings, setSettings] = useState<ByokSettings>(() => loadSettings());
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [browseRefreshSignal, setBrowseRefreshSignal] = useState(0);
+  const [floatingToast, setFloatingToast] = useState<{
+    visible: boolean;
+    exiting: boolean;
+    payload: FloatingProgressPayload | null;
+  }>({ visible: false, exiting: false, payload: null });
   const prevIdxRef = useRef(0);
   const tabHistoryRef = useRef<TabKey[]>([]);
   const browseBackRef = useRef<() => boolean>(() => false);
+  const toastTimerRef = useRef<number | null>(null);
+  const toastExitTimerRef = useRef<number | null>(null);
+
+  const dismissFloatingToast = useCallback(() => {
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+      toastTimerRef.current = null;
+    }
+    setFloatingToast((prev) => (prev.visible ? { ...prev, exiting: true } : prev));
+    if (toastExitTimerRef.current) {
+      window.clearTimeout(toastExitTimerRef.current);
+    }
+    toastExitTimerRef.current = window.setTimeout(() => {
+      setFloatingToast({ visible: false, exiting: false, payload: null });
+      toastExitTimerRef.current = null;
+    }, 300);
+  }, []);
+
+  const handleFloatingStatus = useCallback(
+    (payload: FloatingProgressPayload | null) => {
+      if (toastTimerRef.current) {
+        window.clearTimeout(toastTimerRef.current);
+        toastTimerRef.current = null;
+      }
+      if (toastExitTimerRef.current) {
+        window.clearTimeout(toastExitTimerRef.current);
+        toastExitTimerRef.current = null;
+      }
+      if (!payload) {
+        dismissFloatingToast();
+        return;
+      }
+      setFloatingToast({ visible: true, exiting: false, payload });
+      if (payload.kind === 'success') {
+        toastTimerRef.current = window.setTimeout(() => {
+          dismissFloatingToast();
+        }, 10000);
+      } else if (payload.kind === 'error') {
+        toastTimerRef.current = window.setTimeout(() => {
+          dismissFloatingToast();
+        }, 8000);
+      }
+    },
+    [dismissFloatingToast]
+  );
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+      if (toastExitTimerRef.current) window.clearTimeout(toastExitTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     return attachAndroidEdgeStretch();
@@ -90,6 +154,67 @@ export const App: React.FC = () => {
 
   return (
     <div id="app-shell" className="min-h-screen flex flex-col max-w-[460px] mx-auto relative">
+      {/* Top Floating Progress / Completion Banner */}
+      {floatingToast.visible && floatingToast.payload && (
+        <div className="fixed top-0 left-0 right-0 z-50 safe-top px-3 pt-2 pointer-events-none">
+          <div
+            className={`max-w-[440px] mx-auto pointer-events-auto dj-glass-panel border-l-2 px-3.5 py-2.5 shadow-2xl flex items-start justify-between gap-2.5 ${
+              floatingToast.payload.kind === 'error'
+                ? 'border-l-[#D47A7A]'
+                : 'border-l-[#6FA88B]'
+            } ${floatingToast.exiting ? 'dj-toast-exit' : 'dj-toast-enter'}`}
+          >
+            <div
+              className="min-w-0 flex-1"
+              onClick={() => {
+                if (floatingToast.payload?.kind === 'success') {
+                  switchTab('browse');
+                  dismissFloatingToast();
+                }
+              }}
+            >
+              <div className="flex items-center gap-2 text-[10px] tracking-[0.14em] uppercase mb-0.5">
+                {floatingToast.payload.kind === 'progress' && (
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#6FA88B] animate-pulse" />
+                )}
+                <span
+                  className={
+                    floatingToast.payload.kind === 'error' ? 'text-[#D47A7A]' : 'text-[#6FA88B]'
+                  }
+                >
+                  {floatingToast.payload.kind === 'progress'
+                    ? `手機端進度${floatingToast.payload.stage ? ` · ${floatingToast.payload.stage}` : ''}`
+                    : floatingToast.payload.kind === 'success'
+                    ? '分析完成 · 點擊前往檢索'
+                    : '分析狀態'}
+                </span>
+              </div>
+              <div className="text-xs text-[#F4F4F0] leading-snug break-words">
+                {floatingToast.payload.message}
+              </div>
+            </div>
+            {floatingToast.payload.kind === 'progress' && floatingToast.payload.onCancel ? (
+              <button
+                type="button"
+                onClick={floatingToast.payload.onCancel}
+                className="shrink-0 text-[11px] px-2 py-1 border border-[#D47A7A]/60 text-[#D47A7A] hover:bg-[#D47A7A]/15"
+              >
+                停止
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={dismissFloatingToast}
+                className="shrink-0 text-xs px-1.5 py-0.5 text-[#9A9E9C] hover:text-[#F4F4F0]"
+                aria-label="關閉通知"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Architectural Header */}
       <header className="safe-top px-5 pt-4 pb-4 border-b border-[rgba(255,255,255,0.14)]">
         <div className="flex items-center justify-between text-[11px] tracking-[0.18em] text-[#6E7371] dj-tnum mb-2">
@@ -111,6 +236,7 @@ export const App: React.FC = () => {
             settings={settings}
             onGoSettings={() => switchTab('settings')}
             onAnalysisComplete={() => setBrowseRefreshSignal((n) => n + 1)}
+            onFloatingStatus={handleFloatingStatus}
           />
         </div>
 
