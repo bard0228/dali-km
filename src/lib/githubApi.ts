@@ -79,40 +79,51 @@ export async function putVaultFile(
   const cleanPath = repoPath.replace(/^\/+/, '');
   const url = `${GH_API_BASE}/repos/${owner}/${repo}/contents/${cleanPath}`;
 
-  // Check if file exists to grab SHA for updates
-  let existingSha: string | undefined;
-  const checkRes = await fetch(`${url}?ref=${encodeURIComponent(branch)}`, {
-    headers: ghHeaders(settings.githubPat),
-    signal,
-  });
-  if (checkRes.ok) {
+  const fetchLatestSha = async (): Promise<string | undefined> => {
+    const checkRes = await fetch(
+      `${url}?ref=${encodeURIComponent(branch)}&_t=${Date.now()}`,
+      {
+        headers: ghHeaders(settings.githubPat),
+        cache: 'no-store',
+        signal,
+      }
+    );
+    if (!checkRes.ok) return undefined;
     const existing = (await checkRes.json()) as { sha?: string };
-    existingSha = existing.sha;
-  }
-
-  const body: Record<string, string> = {
-    message: commitMessage,
-    content: base64Content,
-    branch,
+    return existing.sha;
   };
-  if (existingSha) {
-    body.sha = existingSha;
+
+  let lastStatus = 0;
+  let lastErr = '';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const existingSha = await fetchLatestSha();
+    const body: Record<string, string> = {
+      message: commitMessage,
+      content: base64Content,
+      branch,
+    };
+    if (existingSha) {
+      body.sha = existingSha;
+    }
+
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        ...ghHeaders(settings.githubPat),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      cache: 'no-store',
+      signal,
+    });
+
+    if (res.ok) return;
+    lastStatus = res.status;
+    lastErr = await res.text();
+    if (res.status !== 409) break;
   }
 
-  const res = await fetch(url, {
-    method: 'PUT',
-    headers: {
-      ...ghHeaders(settings.githubPat),
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-    signal,
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`寫入 ${cleanPath} 失敗 (HTTP ${res.status}): ${errText.slice(0, 180)}`);
-  }
+  throw new Error(`寫入 ${cleanPath} 失敗 (HTTP ${lastStatus}): ${lastErr.slice(0, 180)}`);
 }
 
 export async function triggerIngestWorkflow(
@@ -180,9 +191,12 @@ export async function getVaultFileText(
   const repo = settings.githubRepo.trim();
   const branch = settings.githubBranch.trim() || 'main';
   const cleanPath = repoPath.replace(/^\/+/, '');
-  const url = `${GH_API_BASE}/repos/${owner}/${repo}/contents/${cleanPath}?ref=${encodeURIComponent(branch)}`;
+  const url = `${GH_API_BASE}/repos/${owner}/${repo}/contents/${cleanPath}?ref=${encodeURIComponent(branch)}&_t=${Date.now()}`;
 
-  const res = await fetch(url, { headers: ghHeaders(settings.githubPat) });
+  const res = await fetch(url, {
+    headers: ghHeaders(settings.githubPat),
+    cache: 'no-store',
+  });
   if (!res.ok) {
     throw new Error(`讀取 ${cleanPath} 失敗 (HTTP ${res.status})`);
   }
@@ -191,7 +205,7 @@ export async function getVaultFileText(
     return base64ToUtf8(data.content);
   }
   if (data.download_url) {
-    const rawRes = await fetch(data.download_url);
+    const rawRes = await fetch(data.download_url, { cache: 'no-store' });
     return await rawRes.text();
   }
   throw new Error(`檔案 ${cleanPath} 無內容可讀取`);
@@ -242,9 +256,13 @@ export async function deleteVaultFile(
   const cleanPath = repoPath.replace(/^\/+/, '');
   const url = `${GH_API_BASE}/repos/${owner}/${repo}/contents/${cleanPath}`;
 
-  const checkRes = await fetch(`${url}?ref=${encodeURIComponent(branch)}`, {
-    headers: ghHeaders(settings.githubPat),
-  });
+  const checkRes = await fetch(
+    `${url}?ref=${encodeURIComponent(branch)}&_t=${Date.now()}`,
+    {
+      headers: ghHeaders(settings.githubPat),
+      cache: 'no-store',
+    }
+  );
   if (checkRes.status === 404) return;
   if (!checkRes.ok) {
     throw new Error(`查詢 ${cleanPath} SHA 失敗 (HTTP ${checkRes.status})`);
@@ -263,6 +281,7 @@ export async function deleteVaultFile(
       sha: existing.sha,
       branch,
     }),
+    cache: 'no-store',
   });
   if (!res.ok && res.status !== 404) {
     const errText = await res.text();
@@ -291,11 +310,19 @@ export async function deleteVaultNoteAndAssets(
     }
   }
 
-  // 3. Update search-index.json immediately so 02 檢索 reflects deletion right away
-  if (currentIndexPayload) {
-    const nextNotes = currentIndexPayload.notes.filter((n) => n.id !== noteId);
+  // 3. Re-fetch latest search-index.json (to avoid overwriting recent updates) and remove noteId
+  let latestPayload = currentIndexPayload;
+  try {
+    const freshRaw = await getVaultFileText(settings, 'index/search-index.json');
+    latestPayload = JSON.parse(freshRaw) as import('./kbTypes').SearchIndexPayload;
+  } catch {
+    // fallback to currentIndexPayload
+  }
+
+  if (latestPayload) {
+    const nextNotes = latestPayload.notes.filter((n) => n.id !== noteId);
     const updatedIndex = {
-      ...currentIndexPayload,
+      ...latestPayload,
       total: nextNotes.length,
       notes: nextNotes,
     };
