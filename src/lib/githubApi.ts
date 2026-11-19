@@ -289,12 +289,98 @@ export async function deleteVaultFile(
   }
 }
 
+export function extractYoutubeVideoId(url?: string): string | null {
+  if (!url) return null;
+  const m = url.match(
+    /(?:youtube\.com\/watch\?.*?v=|youtu\.be\/|youtube\.com\/shorts\/|youtube\.com\/live\/|youtube\.com\/embed\/)([A-Za-z0-9_-]{11})/
+  );
+  return m?.[1] || null;
+}
+
+export interface PendingEdgeVideo {
+  video_id: string;
+  url: string;
+  title: string;
+  channel_name: string;
+  channel_id?: string;
+  tags?: string[];
+  detail_level?: 'concise' | 'detailed';
+  queued_at?: string;
+  reason?: string;
+}
+
+export async function getPendingEdgeVideos(settings: ByokSettings): Promise<PendingEdgeVideo[]> {
+  try {
+    const raw = await getVaultFileText(settings, 'state/pending_edge_videos.json');
+    const parsed = JSON.parse(raw) as { videos?: PendingEdgeVideo[] };
+    return Array.isArray(parsed.videos) ? parsed.videos.filter((v) => Boolean(v?.video_id && v?.url)) : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function markPendingEdgeVideoCompleted(
+  settings: ByokSettings,
+  videoId: string,
+  channelId?: string
+): Promise<void> {
+  // 1. Remove from state/pending_edge_videos.json
+  try {
+    const raw = await getVaultFileText(settings, 'state/pending_edge_videos.json');
+    const parsed = JSON.parse(raw) as { videos?: PendingEdgeVideo[] };
+    const existing = Array.isArray(parsed.videos) ? parsed.videos : [];
+    const filtered = existing.filter((v) => v.video_id !== videoId);
+    if (filtered.length !== existing.length) {
+      await putVaultFile(
+        settings,
+        'state/pending_edge_videos.json',
+        utf8ToBase64(JSON.stringify({ videos: filtered }, null, 2) + '\n'),
+        `chore(follow): complete edge harvest for ${videoId}`
+      );
+    }
+  } catch {
+    // ignore if file missing
+  }
+
+  // 2. Mark videoId in state/followed_channels.json seen_video_ids
+  try {
+    const rawCh = await getVaultFileText(settings, 'state/followed_channels.json');
+    const parsedCh = JSON.parse(rawCh) as {
+      channels?: Array<{ channel_id?: string; seen_video_ids?: string[]; [k: string]: unknown }>;
+    };
+    const channels = Array.isArray(parsedCh.channels) ? parsedCh.channels : [];
+    let modified = false;
+    const nextChannels = channels.map((ch) => {
+      if (channelId && ch.channel_id && ch.channel_id !== channelId) return ch;
+      if (!channelId && channels.length > 1) return ch;
+      const seen = new Set(Array.isArray(ch.seen_video_ids) ? ch.seen_video_ids : []);
+      if (!seen.has(videoId)) {
+        seen.add(videoId);
+        modified = true;
+        return { ...ch, seen_video_ids: Array.from(seen).slice(-50) };
+      }
+      return ch;
+    });
+    if (modified) {
+      await putVaultFile(
+        settings,
+        'state/followed_channels.json',
+        utf8ToBase64(JSON.stringify({ channels: nextChannels }, null, 2) + '\n'),
+        `chore(follow): mark ${videoId} as seen after edge harvest`
+      );
+    }
+  } catch {
+    // ignore if followed_channels.json missing
+  }
+}
+
 export async function deleteVaultNoteAndAssets(
   settings: ByokSettings,
   notePath: string,
   noteId: string,
   rawAssets: string[],
-  currentIndexPayload: import('./kbTypes').SearchIndexPayload | null
+  currentIndexPayload: import('./kbTypes').SearchIndexPayload | null,
+  sourceUrl?: string
 ): Promise<void> {
   // 1. Delete the note markdown file
   await deleteVaultFile(settings, notePath, `chore(kb): delete note ${noteId}`);
@@ -332,5 +418,52 @@ export async function deleteVaultNoteAndAssets(
       utf8ToBase64(JSON.stringify(updatedIndex, null, 2) + '\n'),
       `chore(index): remove ${noteId} from search-index.json`
     );
+  }
+
+  // 4. If deleted note is a YouTube video, unmark it from followed_channels.json & pending_edge_videos.json
+  // so deleting a note from 02 檢索 allows re-analyzing it on the next follow sync.
+  const ytId = extractYoutubeVideoId(sourceUrl);
+  if (ytId) {
+    try {
+      const rawCh = await getVaultFileText(settings, 'state/followed_channels.json');
+      const parsedCh = JSON.parse(rawCh) as {
+        channels?: Array<{ seen_video_ids?: string[]; [k: string]: unknown }>;
+      };
+      const channels = Array.isArray(parsedCh.channels) ? parsedCh.channels : [];
+      let changed = false;
+      const nextChannels = channels.map((ch) => {
+        const seen = Array.isArray(ch.seen_video_ids) ? ch.seen_video_ids : [];
+        if (!seen.includes(ytId)) return ch;
+        changed = true;
+        return { ...ch, seen_video_ids: seen.filter((id) => id !== ytId) };
+      });
+      if (changed) {
+        await putVaultFile(
+          settings,
+          'state/followed_channels.json',
+          utf8ToBase64(JSON.stringify({ channels: nextChannels }, null, 2) + '\n'),
+          `chore(follow): unmark deleted video ${ytId} from seen_video_ids`
+        );
+      }
+    } catch {
+      // ignore if followed_channels.json missing
+    }
+
+    try {
+      const rawEdge = await getVaultFileText(settings, 'state/pending_edge_videos.json');
+      const parsedEdge = JSON.parse(rawEdge) as { videos?: PendingEdgeVideo[] };
+      const existing = Array.isArray(parsedEdge.videos) ? parsedEdge.videos : [];
+      const filtered = existing.filter((v) => v.video_id !== ytId);
+      if (filtered.length !== existing.length) {
+        await putVaultFile(
+          settings,
+          'state/pending_edge_videos.json',
+          utf8ToBase64(JSON.stringify({ videos: filtered }, null, 2) + '\n'),
+          `chore(follow): remove deleted video ${ytId} from pending_edge_videos`
+        );
+      }
+    } catch {
+      // ignore if pending_edge_videos.json missing
+    }
   }
 }

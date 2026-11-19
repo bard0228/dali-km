@@ -1,10 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { FloatingProgressPayload } from '../App';
 import {
+  getPendingEdgeVideos,
   getVaultFileText,
+  markPendingEdgeVideoCompleted,
   triggerFollowWorkflow,
   triggerIngestWorkflow,
   putVaultFile,
+  type PendingEdgeVideo,
 } from '../lib/githubApi';
 import { isNativeApkEnv, type NativeProgressEvent } from '../lib/nativeBridge';
 import {
@@ -143,6 +146,56 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({
   const configured = isGithubConfigured(settings);
   const isNative = isNativeApkEnv();
 
+  const [pendingEdgeVideos, setPendingEdgeVideos] = useState<PendingEdgeVideo[]>([]);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const pendingQueueRef = useRef<PendingEdgeVideo[]>([]);
+  const activeQueueItemRef = useRef<PendingEdgeVideo | null>(null);
+  const queueCompletedCountRef = useRef(0);
+  const edgeQueueCheckedRef = useRef(false);
+
+  const launchEdgeQueueItem = (item: PendingEdgeVideo, remainingCount: number) => {
+    const s = settingsRef.current;
+    activeQueueItemRef.current = item;
+    activeNativeRef.current = true;
+    activeNativeUrlRef.current = item.url;
+    setNativeFailedUrl(null);
+    setSubmitting(true);
+    const prefix = remainingCount > 0 ? `[排程補抓 · 尚餘 ${remainingCount + 1} 部] ` : '[排程補抓] ';
+    setNativeProgress({ stage: 'fetching', message: `${prefix}${item.title || item.url}` });
+    onFloatingStatusRef.current?.({
+      kind: 'progress',
+      stage: 'fetching',
+      message: `${prefix}${item.title || item.url}`,
+      onCancel: () => handleCancelRef.current(),
+    });
+    try {
+      window.DaliNativeBridge?.syncSettings?.(JSON.stringify(s));
+    } catch {
+      // ignore
+    }
+    window.DaliNativeBridge?.processUrlInEdgeHarvester?.(
+      JSON.stringify({
+        source_type: 'youtube',
+        source_url: item.url,
+        title: item.title || '',
+        tags: item.tags || ['頻道追蹤', item.channel_name],
+        user_summary: `來自追蹤頻道「${item.channel_name}」手機端補抓。`,
+        detail_level: item.detail_level || s.defaultDetailLevel || 'detailed',
+        ai_provider: s.aiProvider || 'gemini',
+        gemini_model: s.geminiModel || 'gemini-2.5-flash',
+      })
+    );
+  };
+
+  const startPendingEdgeQueue = (items: PendingEdgeVideo[]) => {
+    if (!isNativeApkEnv() || items.length === 0 || submitting || activeNativeRef.current) return;
+    const [first, ...rest] = items;
+    pendingQueueRef.current = rest;
+    queueCompletedCountRef.current = 0;
+    launchEdgeQueueItem(first, rest.length);
+  };
+
   // Keep local detailLevel default aligned with 04 設定 when not actively running a job
   useEffect(() => {
     if (submitting) return;
@@ -153,6 +206,36 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({
   useEffect(() => {
     window.onDaliNativeProgress = (ev) => {
       if (ev.stage === 'done') {
+        const doneQueueItem = activeQueueItemRef.current;
+        if (doneQueueItem) {
+          activeQueueItemRef.current = null;
+          queueCompletedCountRef.current += 1;
+          setPendingEdgeVideos((prev) => prev.filter((v) => v.video_id !== doneQueueItem.video_id));
+          void markPendingEdgeVideoCompleted(
+            settingsRef.current,
+            doneQueueItem.video_id,
+            doneQueueItem.channel_id
+          );
+
+          if (pendingQueueRef.current.length > 0) {
+            const [nextItem, ...rest] = pendingQueueRef.current;
+            pendingQueueRef.current = rest;
+            launchEdgeQueueItem(nextItem, rest.length);
+            return;
+          }
+
+          activeNativeRef.current = false;
+          activeNativeUrlRef.current = '';
+          setNativeFailedUrl(null);
+          setNativeProgress(null);
+          setSubmitting(false);
+          const msg = `已完成追蹤頻道手機端補抓（共 ${queueCompletedCountRef.current} 部）！`;
+          setResult({ ok: true, text: msg });
+          onFloatingStatusRef.current?.({ kind: 'success', message: msg });
+          onAnalysisCompleteRef.current?.();
+          return;
+        }
+
         activeNativeRef.current = false;
         activeNativeUrlRef.current = '';
         setNativeFailedUrl(null);
@@ -163,6 +246,8 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({
         onFloatingStatusRef.current?.({ kind: 'success', message: msg });
         onAnalysisCompleteRef.current?.();
       } else if (ev.stage === 'cancelled') {
+        pendingQueueRef.current = [];
+        activeQueueItemRef.current = null;
         activeNativeRef.current = false;
         activeNativeUrlRef.current = '';
         setNativeFailedUrl(null);
@@ -172,6 +257,8 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({
         setResult({ ok: false, text: msg });
         onFloatingStatusRef.current?.({ kind: 'error', message: msg });
       } else if (ev.stage === 'error') {
+        pendingQueueRef.current = [];
+        activeQueueItemRef.current = null;
         activeNativeRef.current = false;
         setNativeFailedUrl(activeNativeUrlRef.current || null);
         setNativeProgress(null);
@@ -210,16 +297,36 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({
     }
   }, []);
 
+  // Auto-check state/pending_edge_videos.json once on APK launch and harvest via phone IP
+  useEffect(() => {
+    if (!configured || !isNativeApkEnv() || edgeQueueCheckedRef.current) return;
+    edgeQueueCheckedRef.current = true;
+    getPendingEdgeVideos(settings)
+      .then((videos) => {
+        setPendingEdgeVideos(videos);
+        if (videos.length > 0 && !activeNativeRef.current) {
+          startPendingEdgeQueue(videos);
+        }
+      })
+      .catch(() => {
+        // ignore
+      });
+  }, [configured, settings]);
+
   useEffect(() => {
     if (sourceType !== 'follow' || !configured) return;
     setChannelsLoading(true);
-    getVaultFileText(settings, 'state/followed_channels.json')
-      .then((raw) => {
-        const parsed = JSON.parse(raw) as { channels?: FollowedChannel[] };
-        setChannels(parsed.channels || []);
-      })
-      .catch(() => setChannels([]))
-      .finally(() => setChannelsLoading(false));
+    Promise.all([
+      getVaultFileText(settings, 'state/followed_channels.json')
+        .then((raw) => {
+          const parsed = JSON.parse(raw) as { channels?: FollowedChannel[] };
+          setChannels(parsed.channels || []);
+        })
+        .catch(() => setChannels([])),
+      getPendingEdgeVideos(settings)
+        .then((videos) => setPendingEdgeVideos(videos))
+        .catch(() => setPendingEdgeVideos([])),
+    ]).finally(() => setChannelsLoading(false));
   }, [sourceType, configured, settings]);
 
   const parsedUrlsFromBatch = useMemo(() => {
@@ -728,6 +835,33 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({
               }`}
             >
               {result.text}
+            </div>
+          )}
+
+          {pendingEdgeVideos.length > 0 && (
+            <div className="dj-card p-3 border-l-2 border-l-[#6FA88B] space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs text-[#F4F4F0]">
+                  待手機端補抓（{pendingEdgeVideos.length} 部，雲端被 YouTube 擋 IP）
+                </div>
+                {isNativeApkEnv() && (
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={() => startPendingEdgeQueue(pendingEdgeVideos)}
+                    className="dj-btn dj-btn-primary text-[11px] px-2.5 py-1 shrink-0"
+                  >
+                    立即補抓
+                  </button>
+                )}
+              </div>
+              <div className="space-y-1">
+                {pendingEdgeVideos.slice(0, 5).map((v) => (
+                  <div key={v.video_id} className="text-[11px] text-[#9A9E9C] truncate">
+                    · [{v.channel_name}] {v.title || v.url}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 

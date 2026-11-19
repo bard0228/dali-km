@@ -461,7 +461,8 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
         deleteTarget.path,
         deleteTarget.id,
         deleteTarget.raw_assets,
-        indexData
+        indexData,
+        deleteTarget.source_url
       );
       setIndexData((prev) => {
         if (!prev) return prev;
