@@ -162,6 +162,7 @@ object EdgeHarvester {
             var usedProvider = if (aiProvider == "openrouter") "openrouter" else "gemini"
             var usedModel = if (aiProvider == "openrouter") OPENROUTER_MODEL else geminiModel
             var oembedTitle = ""
+            var coverImage = ""
             var handled = false
 
             if (isXUrl) {
@@ -171,6 +172,7 @@ object EdgeHarvester {
                 val author = xPost.optString("author", "")
                 val tweetText = xPost.optString("text", "")
                 val xVideoUrl = xPost.optString("video_url", "")
+                coverImage = xPost.optString("cover_image", "")
                 oembedTitle = if (author.isNotBlank()) "$author: ${tweetText.take(36)}" else tweetText.take(40)
 
                 if (xVideoUrl.isNotBlank() && geminiKey.isNotBlank()) {
@@ -241,6 +243,7 @@ object EdgeHarvester {
                 checkCancelled(cancelled)
                 val ogTitle = og.first
                 val ogDesc = og.second
+                if (og.third.isNotBlank()) coverImage = og.third
                 oembedTitle = ogTitle
                 val fullText = listOf(ogTitle, ogDesc).filter { it.isNotBlank() }.joinToString("\n\n")
                 if (ogDesc.isBlank() && fullText.isBlank()) {
@@ -289,6 +292,7 @@ object EdgeHarvester {
                     val igOg = fetchMetaOpenGraph(sourceUrl)
                     if (igOg.first.isNotBlank()) scrapedTitle = igOg.first
                     igOgDesc = igOg.second
+                    if (igOg.third.isNotBlank()) coverImage = igOg.third
                     checkCancelled(cancelled)
                 }
 
@@ -441,7 +445,8 @@ object EdgeHarvester {
                 createdAt = createdAt,
                 structured = structured,
                 keyFrames = keyFrames,
-                executionStats = executionStats
+                executionStats = executionStats,
+                coverImage = coverImage
             )
 
             checkCancelled(cancelled)
@@ -523,10 +528,19 @@ object EdgeHarvester {
                                 }
                             }
                         }
+                        var coverImg = ""
+                        val photos = data.optJSONArray("photos")
+                        if (photos != null && photos.length() > 0) {
+                            coverImg = photos.optJSONObject(0)?.optString("url", "") ?: ""
+                        }
+                        if (coverImg.isBlank()) {
+                            coverImg = data.optJSONObject("video")?.optString("poster", "") ?: ""
+                        }
                         return JSONObject()
                             .put("author", author)
                             .put("text", fullText)
                             .put("video_url", videoUrl)
+                            .put("cover_image", coverImg)
                     }
                 }
             }
@@ -552,10 +566,19 @@ object EdgeHarvester {
                         if (videos != null && videos.length() > 0) {
                             videoUrl = videos.optJSONObject(0)?.optString("url", "") ?: ""
                         }
+                        var coverImg = ""
+                        val photos = tweet.optJSONObject("media")?.optJSONArray("photos")
+                        if (photos != null && photos.length() > 0) {
+                            coverImg = photos.optJSONObject(0)?.optString("url", "") ?: ""
+                        }
+                        if (coverImg.isBlank() && videos != null && videos.length() > 0) {
+                            coverImg = videos.optJSONObject(0)?.optString("thumbnail_url", "") ?: ""
+                        }
                         return JSONObject()
                             .put("author", author)
                             .put("text", text)
                             .put("video_url", videoUrl)
+                            .put("cover_image", coverImg)
                     }
                 }
             }
@@ -601,7 +624,7 @@ object EdgeHarvester {
         }
     }
 
-    private fun fetchMetaOpenGraph(url: String): Pair<String, String> {
+    private fun fetchMetaOpenGraph(url: String): Triple<String, String, String> {
         return try {
             val req = Request.Builder()
                 .url(url)
@@ -610,15 +633,16 @@ object EdgeHarvester {
                 .get()
                 .build()
             http.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return "" to ""
-                val html = resp.body?.string() ?: return "" to ""
+                if (!resp.isSuccessful) return Triple("", "", "")
+                val html = resp.body?.string() ?: return Triple("", "", "")
                 val title = extractMetaContent(html, "og:title")
                 val desc = extractMetaContent(html, "og:description")
                     .ifBlank { extractMetaContent(html, "description", "name") }
-                title to desc
+                val img = extractMetaContent(html, "og:image")
+                Triple(title, desc, img)
             }
         } catch (_: Exception) {
-            "" to ""
+            Triple("", "", "")
         }
     }
 
@@ -1599,7 +1623,8 @@ object EdgeHarvester {
         createdAt: String,
         structured: JSONObject,
         keyFrames: JSONArray,
-        executionStats: JSONObject
+        executionStats: JSONObject,
+        coverImage: String = ""
     ): String {
         val tagsYaml = tags.joinToString("\n") { "- $it" }
         val assetsYaml = if (rawAssets.length() == 0) "[]" else {
@@ -1614,6 +1639,9 @@ object EdgeHarvester {
         sb.append("category: $category\n")
         sb.append("tags:\n$tagsYaml\n")
         sb.append("source_url: $sourceUrl\n")
+        if (coverImage.isNotBlank()) {
+            sb.append("cover_image: \"${coverImage.replace("\"", "\\\"")}\"\n")
+        }
         sb.append("raw_assets: $assetsYaml\n")
         sb.append("user_summary: \"${userSummary.replace("\"", "\\\"")}\"\n")
         sb.append("created_at: '$createdAt'\n")

@@ -14,6 +14,7 @@ import {
 } from '../lib/storage';
 
 type SourceKind =
+  | 'smart_url'
   | 'screenshot'
   | 'youtube'
   | 'ig_video'
@@ -36,12 +37,11 @@ interface FollowedChannel {
 interface QuickInboxProps {
   settings: ByokSettings;
   onGoSettings: () => void;
+  onAnalysisComplete?: () => void;
 }
 
 const SOURCE_OPTIONS: { id: SourceKind; label: string }[] = [
-  { id: 'youtube', label: 'YouTube' },
-  { id: 'ig_video', label: 'IG/抖音/短片' },
-  { id: 'article', label: '文章/Threads' },
+  { id: 'smart_url', label: '智慧網址 (自動辨識)' },
   { id: 'screenshot', label: '截圖/圖片' },
   { id: 'document_ocr', label: '多頁文件OCR' },
   { id: 'book_recon', label: '搜書/ISBN' },
@@ -63,6 +63,18 @@ function detectUrlSourceType(url: string): 'youtube' | 'ig_video' | 'article' {
     return 'ig_video';
   }
   return 'article';
+}
+
+function getSmartUrlPlatformLabel(url: string): string {
+  const low = url.trim().toLowerCase();
+  if (!low) return '支援 YouTube / IG / 抖音 / X / Threads / 網頁文章';
+  if (low.includes('youtube.com') || low.includes('youtu.be')) return '已自動辨識：YouTube 影音';
+  if (low.includes('instagram.com')) return '已自動辨識：Instagram Reels / 貼文';
+  if (low.includes('tiktok.com') || low.includes('douyin.com')) return '已自動辨識：抖音 / TikTok 短片';
+  if (low.includes('bilibili.com')) return '已自動辨識：Bilibili 影音';
+  if (low.includes('x.com/') || low.includes('twitter.com/')) return '已自動辨識：X (Twitter) 貼文／影片';
+  if (low.includes('threads.com/') || low.includes('threads.net/')) return '已自動辨識：Threads 貼文';
+  return '已自動辨識：網頁文章';
 }
 
 function fileToBase64(file: File): Promise<string> {
@@ -87,8 +99,12 @@ function stringToBase64(text: string): string {
   return btoa(binary);
 }
 
-export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }) => {
-  const [sourceType, setSourceType] = useState<SourceKind>('youtube');
+export const QuickInbox: React.FC<QuickInboxProps> = ({
+  settings,
+  onGoSettings,
+  onAnalysisComplete,
+}) => {
+  const [sourceType, setSourceType] = useState<SourceKind>('smart_url');
   const [sourceUrl, setSourceUrl] = useState('');
   const [bookQuery, setBookQuery] = useState('');
   const [batchText, setBatchText] = useState('');
@@ -109,6 +125,8 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
   const abortControllerRef = useRef<AbortController | null>(null);
   const activeNativeRef = useRef(false);
   const activeNativeUrlRef = useRef<string>('');
+  const onAnalysisCompleteRef = useRef(onAnalysisComplete);
+  onAnalysisCompleteRef.current = onAnalysisComplete;
 
   // Follow channel state
   const [channels, setChannels] = useState<FollowedChannel[]>([]);
@@ -135,6 +153,7 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
         setNativeProgress(null);
         setSubmitting(false);
         setResult({ ok: true, text: ev.message || '手機端解析與知識庫同步完成！' });
+        onAnalysisCompleteRef.current?.();
       } else if (ev.stage === 'cancelled') {
         activeNativeRef.current = false;
         activeNativeUrlRef.current = '';
@@ -155,8 +174,7 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
     window.onDaliNativeShared = (payload) => {
       const url = String(payload?.url || payload?.text || '').trim();
       if (url) {
-        const detected = detectUrlSourceType(url);
-        setSourceType(detected);
+        setSourceType('smart_url');
         setSourceUrl(url);
       }
     };
@@ -165,7 +183,7 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
       if (shared) {
         const parsed = JSON.parse(shared) as { url?: string };
         if (parsed.url) {
-          setSourceType(detectUrlSourceType(parsed.url));
+          setSourceType('smart_url');
           setSourceUrl(parsed.url);
         }
       }
@@ -268,9 +286,6 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
       if (nativeClip && nativeClip.trim()) {
         const trimmed = nativeClip.trim();
         setSourceUrl(trimmed);
-        if (/^https?:\/\//i.test(trimmed)) {
-          setSourceType(detectUrlSourceType(trimmed));
-        }
         setNativeFailedUrl(null);
         return;
       }
@@ -278,9 +293,6 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
       const trimmed = clip.trim();
       if (trimmed) {
         setSourceUrl(trimmed);
-        if (/^https?:\/\//i.test(trimmed)) {
-          setSourceType(detectUrlSourceType(trimmed));
-        }
         setNativeFailedUrl(null);
       } else {
         setResult({ ok: false, text: '剪貼簿目前沒有文字內容。' });
@@ -293,6 +305,7 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
   const handleFallbackToCloud = async () => {
     const urlToQueue = (nativeFailedUrl || sourceUrl).trim();
     if (!urlToQueue || submitting) return;
+    const resolvedType = sourceType === 'smart_url' ? detectUrlSourceType(urlToQueue) : sourceType;
     const tags = tagsText
       .split(/[,，]/)
       .map((t) => t.trim())
@@ -305,7 +318,7 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
     try {
       const stamp = nowTaipeiStamp();
       const taskJson: Record<string, unknown> = {
-        source_type: sourceType,
+        source_type: resolvedType,
         source_url: urlToQueue,
         title: title.trim() || undefined,
         tags,
@@ -315,15 +328,15 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
         gemini_model: settings.geminiModel || 'gemini-3.8-flash',
         created_at: nowTaipeiIso(),
       };
-      const taskPath = `inbox/pending/${stamp}_${sourceType}.json`;
+      const taskPath = `inbox/pending/${stamp}_${resolvedType}.json`;
       await putVaultFile(
         settings,
         taskPath,
         stringToBase64(JSON.stringify(taskJson, null, 2)),
-        `inbox(${sourceType}): cloud fallback ${stamp}`,
+        `inbox(${resolvedType}): cloud fallback ${stamp}`,
         controller.signal
       );
-      await triggerIngestWorkflow(settings, `${sourceType}:${urlToQueue}`, controller.signal);
+      await triggerIngestWorkflow(settings, `${resolvedType}:${urlToQueue}`, controller.signal);
       setSourceUrl('');
       setTitle('');
       setTagsText('');
@@ -356,6 +369,8 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
       .filter(Boolean);
     const activeProvider = settings.aiProvider || 'gemini';
     const activeGeminiModel = settings.geminiModel || 'gemini-3.8-flash';
+    const effectiveType =
+      sourceType === 'smart_url' ? detectUrlSourceType(sourceUrl.trim()) : sourceType;
 
     // 1. Native Android Edge Harvester path for video & X/Threads links (always on in APK)
     const lowUrl = sourceUrl.trim().toLowerCase();
@@ -366,9 +381,9 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
       lowUrl.includes('threads.net/');
     if (
       isNative &&
-      (sourceType === 'youtube' ||
-        sourceType === 'ig_video' ||
-        (sourceType === 'article' && isNativeSocialUrl)) &&
+      (effectiveType === 'youtube' ||
+        effectiveType === 'ig_video' ||
+        (effectiveType === 'article' && isNativeSocialUrl)) &&
       sourceUrl.trim()
     ) {
       const targetUrl = sourceUrl.trim();
@@ -385,7 +400,7 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
       }
       window.DaliNativeBridge?.processUrlInEdgeHarvester?.(
         JSON.stringify({
-          source_type: sourceType,
+          source_type: effectiveType,
           source_url: targetUrl,
           title: title.trim(),
           tags,
@@ -540,19 +555,19 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
         if (files[0]) {
           const file = files[0];
           const ext = file.name.split('.').pop()?.toLowerCase() || 'png';
-          assetFilename = `${stamp}_${sourceType}.${ext}`;
+          assetFilename = `${stamp}_${effectiveType}.${ext}`;
           const b64 = await fileToBase64(file);
           await putVaultFile(
             settings,
             `inbox/pending/${assetFilename}`,
             b64,
-            `inbox(${sourceType}): upload ${assetFilename}`,
+            `inbox(${effectiveType}): upload ${assetFilename}`,
             controller.signal
           );
         }
 
         const taskJson: Record<string, unknown> = {
-          source_type: sourceType,
+          source_type: effectiveType,
           source_url: sourceUrl.trim(),
           query: bookQuery.trim() || undefined,
           title: title.trim() || undefined,
@@ -564,17 +579,17 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
           asset_filename: assetFilename || undefined,
           created_at: nowTaipeiIso(),
         };
-        const taskPath = `inbox/pending/${stamp}_${sourceType}.json`;
+        const taskPath = `inbox/pending/${stamp}_${effectiveType}.json`;
         await putVaultFile(
           settings,
           taskPath,
           stringToBase64(JSON.stringify(taskJson, null, 2)),
-          `inbox(${sourceType}): queue task ${stamp}`,
+          `inbox(${effectiveType}): queue task ${stamp}`,
           controller.signal
         );
         await triggerIngestWorkflow(
           settings,
-          `${sourceType}:${bookQuery.trim() || sourceUrl.trim()}`,
+          `${effectiveType}:${bookQuery.trim() || sourceUrl.trim()}`,
           controller.signal
         );
         setResult({
@@ -778,6 +793,11 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
                   貼上
                 </button>
               </div>
+              {sourceType === 'smart_url' && (
+                <div className="text-[11px] text-[#6FA88B] mt-1.5">
+                  {getSmartUrlPlatformLabel(sourceUrl)}
+                </div>
+              )}
             </div>
           ) : null}
 
@@ -808,7 +828,10 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
             </div>
           )}
 
-          {(sourceType === 'youtube' || sourceType === 'ig_video' || sourceType === 'article') && (
+          {(sourceType === 'smart_url' ||
+            sourceType === 'youtube' ||
+            sourceType === 'ig_video' ||
+            sourceType === 'article') && (
             <div className="grid grid-cols-2 gap-2">
               {(['detailed', 'concise'] as const).map((lvl) => (
                 <button

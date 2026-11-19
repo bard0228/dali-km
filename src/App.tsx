@@ -21,6 +21,7 @@ export const App: React.FC = () => {
   const [slideDir, setSlideDir] = useState<'right' | 'left'>('right');
   const [settings, setSettings] = useState<ByokSettings>(() => loadSettings());
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
+  const [browseRefreshSignal, setBrowseRefreshSignal] = useState(0);
   const prevIdxRef = useRef(0);
   const tabHistoryRef = useRef<TabKey[]>([]);
   const browseBackRef = useRef<() => boolean>(() => false);
@@ -109,6 +110,7 @@ export const App: React.FC = () => {
           <QuickInbox
             settings={settings}
             onGoSettings={() => switchTab('settings')}
+            onAnalysisComplete={() => setBrowseRefreshSignal((n) => n + 1)}
           />
         </div>
 
@@ -119,6 +121,8 @@ export const App: React.FC = () => {
             onClearSelectedNote={() => setSelectedNoteId(null)}
             onGoSettings={() => switchTab('settings')}
             onRegisterBackHandler={registerBrowseBackHandler}
+            isActive={activeTab === 'browse'}
+            refreshSignal={browseRefreshSignal}
           />
         </div>
 

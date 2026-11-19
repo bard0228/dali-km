@@ -40,6 +40,8 @@ interface KnowledgeBrowserProps {
   onClearSelectedNote?: () => void;
   onGoSettings: () => void;
   onRegisterBackHandler?: (handler: () => boolean) => void;
+  isActive?: boolean;
+  refreshSignal?: number;
 }
 
 const TYPE_FILTERS = [
@@ -237,6 +239,8 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
   onClearSelectedNote,
   onGoSettings,
   onRegisterBackHandler,
+  isActive = true,
+  refreshSignal = 0,
 }) => {
   const [indexData, setIndexData] = useState<SearchIndexPayload | null>(null);
   const [loading, setLoading] = useState(false);
@@ -268,6 +272,7 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
 
   const [factChecking, setFactChecking] = useState(false);
   const [factCheckError, setFactCheckError] = useState<string | null>(null);
+  const lastFetchedAtRef = useRef<number>(0);
 
   const configured = isGithubConfigured(settings);
 
@@ -284,6 +289,7 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
       const raw = await getVaultFileText(settings, 'index/search-index.json');
       const parsed = JSON.parse(raw) as SearchIndexPayload;
       setIndexData(parsed);
+      lastFetchedAtRef.current = Date.now();
     } catch (err) {
       setError(err instanceof Error ? err.message : '無法讀取 search-index.json');
     } finally {
@@ -294,6 +300,18 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
   useEffect(() => {
     fetchIndex();
   }, [fetchIndex]);
+
+  useEffect(() => {
+    if (refreshSignal > 0 && configured) {
+      fetchIndex();
+    }
+  }, [refreshSignal, configured, fetchIndex]);
+
+  useEffect(() => {
+    if (isActive && configured && Date.now() - lastFetchedAtRef.current > 8000) {
+      fetchIndex();
+    }
+  }, [isActive, configured, fetchIndex]);
 
   useEffect(() => {
     onRegisterBackHandler?.(() => {
@@ -589,6 +607,27 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
         ? 'Gemini'
         : stats?.provider || 'AI';
 
+    const heroImageUrl = (() => {
+      if (keyFrames.length > 0) {
+        const kfUrl = assetUrls.find((a) => a.path === keyFrames[0].image_path)?.url;
+        if (kfUrl) return kfUrl;
+      }
+      if (assetUrls.length > 0 && assetUrls[0]?.url) {
+        return assetUrls[0].url;
+      }
+      if (activeNote.source_url) {
+        const ytMatch = activeNote.source_url.match(
+          /(?:youtube\.com\/watch\?.*?v=|youtu\.be\/|youtube\.com\/shorts\/|youtube\.com\/live\/|youtube\.com\/embed\/)([A-Za-z0-9_-]{11})/
+        );
+        if (ytMatch?.[1]) {
+          return `https://i.ytimg.com/vi/${ytMatch[1]}/hqdefault.jpg`;
+        }
+      }
+      const coverMatch = noteRawMd.match(/^cover_image:\s*["']?(https?:\/\/[^\s"']+)["']?/m);
+      if (coverMatch?.[1]) return coverMatch[1];
+      return '';
+    })();
+
     return (
       <section
         key={`detail-${activeNote.id}`}
@@ -608,7 +647,7 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
             <button
               type="button"
               onClick={handleCopyLine}
-              className="flex items-center gap-1 text-[11px] px-2 py-1 border border-[#252A2C] text-[#9A9E9C] hover:border-[#6FA88B] hover:text-[#F4F4F0]"
+              className="h-7 flex items-center justify-center gap-1 text-[11px] px-2 border border-[#252A2C] text-[#9A9E9C] hover:border-[#6FA88B] hover:text-[#F4F4F0]"
             >
               <IconCopy className="w-3 h-3" />
               <span>複製 LINE</span>
@@ -616,7 +655,7 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
             <button
               type="button"
               onClick={handleDownloadMd}
-              className="flex items-center gap-1 text-[11px] px-2 py-1 border border-[#252A2C] text-[#9A9E9C] hover:border-[#6FA88B] hover:text-[#F4F4F0]"
+              className="h-7 flex items-center justify-center gap-1 text-[11px] px-2 border border-[#252A2C] text-[#9A9E9C] hover:border-[#6FA88B] hover:text-[#F4F4F0]"
             >
               <IconDownload className="w-3 h-3" />
               <span>.md</span>
@@ -624,7 +663,7 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
             <button
               type="button"
               onClick={() => setDeleteTarget(activeNote)}
-              className="flex items-center gap-1 text-[11px] px-2 py-1 border border-[#252A2C] text-[#D47A7A] hover:border-[#D47A7A]"
+              className="h-7 flex items-center justify-center gap-1 text-[11px] px-2 border border-[#252A2C] text-[#D47A7A] hover:border-[#D47A7A]"
               aria-label="刪除此分析紀錄"
             >
               <IconTrash className="w-3 h-3" />
@@ -651,6 +690,21 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
             </span>
             <span>{activeNote.created_at.slice(0, 10)}</span>
           </div>
+
+          {heroImageUrl && (
+            <button
+              key={`hero-${activeNote.id}-${heroImageUrl}`}
+              type="button"
+              onClick={() => setLightboxUrl({ path: activeNote.title, url: heroImageUrl })}
+              className="w-full text-left dj-curtain-wrap block h-48 border border-[#252A2C]"
+            >
+              <img
+                src={heroImageUrl}
+                alt={activeNote.title}
+                className="dj-curtain-media is-revealed w-full h-48 object-cover"
+              />
+            </button>
+          )}
 
           <h2 className="text-base font-medium text-[#F4F4F0] leading-snug">
             {activeNote.title}
