@@ -152,47 +152,105 @@ object EdgeHarvester {
                 .apply { timeZone = tz }
                 .format(now)
 
-            // 1. 3-Layer subtitle extraction: (A) Direct Watch HTML, (B) InnerTube Android/iOS API, (C) yt-dlp
-            var subtitleText = ""
-            var scrapedTitle = ""
-            val videoId = extractYoutubeVideoId(sourceUrl)
-            if (videoId != null) {
-                onProgress("fetching", "正在直連擷取 YouTube 字幕與影片資訊...")
-                val direct = tryFetchYoutubeCaptionsDirect(videoId, processId)
-                subtitleText = direct.first
-                scrapedTitle = direct.second
-                checkCancelled(cancelled)
-            }
+            val lowUrl = sourceUrl.lowercase(Locale.US)
+            val isXUrl = lowUrl.contains("x.com/") || lowUrl.contains("twitter.com/")
+            val isThreadsUrl = lowUrl.contains("threads.com/") || lowUrl.contains("threads.net/")
+            val isIgUrl = lowUrl.contains("instagram.com/")
 
-            if (subtitleText.isBlank()) {
-                onProgress("fetching", "初始化手機端 yt-dlp 與 FFmpeg 引擎嘗試擷取字幕...")
-                ensureInitialized(context)
-                checkCancelled(cancelled)
-                subtitleText = tryExtractSubtitlesYtDlp(sourceUrl, workDir, processId)
-                checkCancelled(cancelled)
-            }
-
-            val oembedTitle = scrapedTitle.ifBlank { fetchYoutubeOembedTitle(sourceUrl, processId) }
-            checkCancelled(cancelled)
-
-            val structured: JSONObject
+            var structured = JSONObject()
             var keyFrames = JSONArray()
-            val usedProvider: String
-            val usedModel: String
+            var usedProvider = if (aiProvider == "openrouter") "openrouter" else "gemini"
+            var usedModel = if (aiProvider == "openrouter") OPENROUTER_MODEL else geminiModel
+            var oembedTitle = ""
+            var handled = false
 
-            if (subtitleText.isNotBlank()) {
-                usedProvider = if (aiProvider == "openrouter") "openrouter" else "gemini"
-                usedModel = if (aiProvider == "openrouter") OPENROUTER_MODEL else geminiModel
-                val engineLabel = if (aiProvider == "openrouter") {
-                    "OpenRouter ($OPENROUTER_MODEL)"
-                } else {
-                    "Gemini ($geminiModel)"
+            if (isXUrl) {
+                onProgress("fetching", "正在手機端直連擷取 X (Twitter) 推文與影片...")
+                val xPost = fetchXPostData(sourceUrl)
+                checkCancelled(cancelled)
+                val author = xPost.optString("author", "")
+                val tweetText = xPost.optString("text", "")
+                val xVideoUrl = xPost.optString("video_url", "")
+                oembedTitle = if (author.isNotBlank()) "$author: ${tweetText.take(36)}" else tweetText.take(40)
+
+                if (xVideoUrl.isNotBlank() && geminiKey.isNotBlank()) {
+                    onProgress("downloading", "偵測到 X 推文附帶影片，正在下載至手機...")
+                    val xVideoFile = downloadDirectMp4(xVideoUrl, File(workDir, "x_video.mp4"), cancelled)
+                    if (xVideoFile != null) {
+                        usedProvider = "gemini"
+                        usedModel = geminiModel
+                        onProgress("gemini", "上傳 X 影片至 Gemini ($geminiModel) 進行多模態分析...")
+                        val fileUri = uploadToGeminiFileApi(xVideoFile, geminiKey, processId, cancelled)
+                        checkCancelled(cancelled)
+                        val combinedSummary = listOf(
+                            if (author.isNotBlank()) "推文作者：$author" else "",
+                            if (tweetText.isNotBlank()) "推文內容：$tweetText" else "",
+                            userSummary
+                        ).filter { it.isNotBlank() }.joinToString("\n")
+                        structured = analyzeMediaWithGemini(
+                            fileUri = fileUri,
+                            apiKey = geminiKey,
+                            model = geminiModel,
+                            userSummary = combinedSummary,
+                            detailLevel = detailLevel,
+                            processId = processId
+                        )
+                        checkCancelled(cancelled)
+                        onProgress("keyframes", "依 AI 時間戳在本機擷取重點畫面...")
+                        ensureInitialized(context)
+                        val keyPoints = structured.optJSONArray("key_points") ?: JSONArray()
+                        keyFrames = extractKeyFrames(xVideoFile, keyPoints, workDir, noteId, monthDir)
+                        handled = true
+                    }
                 }
-                onProgress("gemini", "已取得字幕，使用 $engineLabel 進行結構化分析...")
+
+                if (!handled) {
+                    val fullText = listOf(
+                        if (author.isNotBlank()) "作者：$author" else "",
+                        tweetText
+                    ).filter { it.isNotBlank() }.joinToString("\n\n")
+                    if (fullText.isBlank()) {
+                        throw IllegalStateException("無法擷取此 X 貼文內容，請確認貼文是否為公開。")
+                    }
+                    onProgress("gemini", "已取得 X 推文內容，正在進行結構化分析...")
+                    structured = if (aiProvider == "openrouter") {
+                        analyzeTextWithOpenRouter(
+                            transcriptText = fullText,
+                            titleHint = customTitle.ifBlank { oembedTitle },
+                            apiKey = openrouterKey,
+                            userSummary = userSummary,
+                            detailLevel = detailLevel,
+                            processId = processId
+                        )
+                    } else {
+                        analyzeTextWithGemini(
+                            transcriptText = fullText,
+                            titleHint = customTitle.ifBlank { oembedTitle },
+                            apiKey = geminiKey,
+                            model = geminiModel,
+                            userSummary = userSummary,
+                            detailLevel = detailLevel,
+                            processId = processId
+                        )
+                    }
+                    handled = true
+                }
+            } else if (isThreadsUrl) {
+                onProgress("fetching", "正在手機端擷取 Threads 貼文內容...")
+                val og = fetchMetaOpenGraph(sourceUrl)
+                checkCancelled(cancelled)
+                val ogTitle = og.first
+                val ogDesc = og.second
+                oembedTitle = ogTitle
+                val fullText = listOf(ogTitle, ogDesc).filter { it.isNotBlank() }.joinToString("\n\n")
+                if (ogDesc.isBlank() && fullText.isBlank()) {
+                    throw IllegalStateException("無法擷取此 Threads 貼文內容，請確認貼文是否為公開。")
+                }
+                onProgress("gemini", "已取得 Threads 貼文，正在進行結構化分析...")
                 structured = if (aiProvider == "openrouter") {
                     analyzeTextWithOpenRouter(
-                        transcriptText = subtitleText,
-                        titleHint = customTitle.ifBlank { oembedTitle },
+                        transcriptText = fullText,
+                        titleHint = customTitle.ifBlank { ogTitle },
                         apiKey = openrouterKey,
                         userSummary = userSummary,
                         detailLevel = detailLevel,
@@ -200,8 +258,8 @@ object EdgeHarvester {
                     )
                 } else {
                     analyzeTextWithGemini(
-                        transcriptText = subtitleText,
-                        titleHint = customTitle.ifBlank { oembedTitle },
+                        transcriptText = fullText,
+                        titleHint = customTitle.ifBlank { ogTitle },
                         apiKey = geminiKey,
                         model = geminiModel,
                         userSummary = userSummary,
@@ -209,37 +267,128 @@ object EdgeHarvester {
                         processId = processId
                     )
                 }
-                structured.put("transcript", buildTranscriptFromSubtitles(subtitleText))
-            } else {
-                // 2. Fallback: download video + Gemini multimodal analysis
-                if (geminiKey.isBlank()) {
-                    throw IllegalStateException("此影片無公開字幕，需使用 Gemini API 下載影片進行多模態分析，請先在「04 設定」填入 Gemini API Key。")
+                handled = true
+            }
+
+            if (!handled) {
+                // 1. 3-Layer subtitle extraction: (A) Direct Watch HTML, (B) InnerTube Android/iOS API, (C) yt-dlp
+                var subtitleText = ""
+                var scrapedTitle = ""
+                val videoId = extractYoutubeVideoId(sourceUrl)
+                if (videoId != null) {
+                    onProgress("fetching", "正在直連擷取 YouTube 字幕與影片資訊...")
+                    val direct = tryFetchYoutubeCaptionsDirect(videoId, processId)
+                    subtitleText = direct.first
+                    scrapedTitle = direct.second
+                    checkCancelled(cancelled)
                 }
-                usedProvider = "gemini"
-                usedModel = geminiModel
-                onProgress("downloading", "此影片無公開字幕，改用手機端下載影片（<=480p）...")
-                ensureInitialized(context)
-                checkCancelled(cancelled)
-                val videoFile = downloadVideoWithYtDlp(sourceUrl, workDir, processId)
-                    ?: throw IllegalStateException("無法下載影片，請確認連結是否有效或是否需要登入。")
 
-                checkCancelled(cancelled)
-                onProgress("gemini", "上傳影片至 Gemini ($geminiModel) 進行多模態聽覺+視覺分析...")
-                val fileUri = uploadToGeminiFileApi(videoFile, geminiKey, processId, cancelled)
-                checkCancelled(cancelled)
-                structured = analyzeMediaWithGemini(
-                    fileUri = fileUri,
-                    apiKey = geminiKey,
-                    model = geminiModel,
-                    userSummary = userSummary,
-                    detailLevel = detailLevel,
-                    processId = processId
-                )
+                var igOgDesc = ""
+                if (isIgUrl) {
+                    onProgress("fetching", "正在擷取 Instagram 貼文說明與影片...")
+                    val igOg = fetchMetaOpenGraph(sourceUrl)
+                    if (igOg.first.isNotBlank()) scrapedTitle = igOg.first
+                    igOgDesc = igOg.second
+                    checkCancelled(cancelled)
+                }
 
+                if (subtitleText.isBlank() && !isIgUrl) {
+                    onProgress("fetching", "初始化手機端 yt-dlp 與 FFmpeg 引擎嘗試擷取字幕...")
+                    ensureInitialized(context)
+                    checkCancelled(cancelled)
+                    subtitleText = tryExtractSubtitlesYtDlp(sourceUrl, workDir, processId)
+                    checkCancelled(cancelled)
+                }
+
+                oembedTitle = scrapedTitle.ifBlank {
+                    if (videoId != null) fetchYoutubeOembedTitle(sourceUrl, processId) else ""
+                }
                 checkCancelled(cancelled)
-                onProgress("keyframes", "依 AI 時間戳在本機擷取重點畫面...")
-                val keyPoints = structured.optJSONArray("key_points") ?: JSONArray()
-                keyFrames = extractKeyFrames(videoFile, keyPoints, workDir, noteId, monthDir)
+
+                if (subtitleText.isNotBlank()) {
+                    val engineLabel = if (aiProvider == "openrouter") {
+                        "OpenRouter ($OPENROUTER_MODEL)"
+                    } else {
+                        "Gemini ($geminiModel)"
+                    }
+                    onProgress("gemini", "已取得字幕，使用 $engineLabel 進行結構化分析...")
+                    structured = if (aiProvider == "openrouter") {
+                        analyzeTextWithOpenRouter(
+                            transcriptText = subtitleText,
+                            titleHint = customTitle.ifBlank { oembedTitle },
+                            apiKey = openrouterKey,
+                            userSummary = userSummary,
+                            detailLevel = detailLevel,
+                            processId = processId
+                        )
+                    } else {
+                        analyzeTextWithGemini(
+                            transcriptText = subtitleText,
+                            titleHint = customTitle.ifBlank { oembedTitle },
+                            apiKey = geminiKey,
+                            model = geminiModel,
+                            userSummary = userSummary,
+                            detailLevel = detailLevel,
+                            processId = processId
+                        )
+                    }
+                    structured.put("transcript", buildTranscriptFromSubtitles(subtitleText))
+                } else {
+                    // 2. Fallback: download video + Gemini multimodal analysis
+                    if (geminiKey.isBlank()) {
+                        throw IllegalStateException("此影片無公開字幕，需使用 Gemini API 下載影片進行多模態分析，請先在「04 設定」填入 Gemini API Key。")
+                    }
+                    usedProvider = "gemini"
+                    usedModel = geminiModel
+                    onProgress("downloading", "此影片無公開字幕，改用手機端下載影片（<=480p）...")
+                    ensureInitialized(context)
+                    checkCancelled(cancelled)
+                    val videoFile = try {
+                        downloadVideoWithYtDlp(sourceUrl, workDir, processId)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (videoFile == null) {
+                        if (isIgUrl && igOgDesc.isNotBlank()) {
+                            onProgress("gemini", "無法下載 IG 影片，改以貼文說明進行結構化分析...")
+                            val igText = listOf(scrapedTitle, igOgDesc).filter { it.isNotBlank() }.joinToString("\n\n")
+                            structured = analyzeTextWithGemini(
+                                transcriptText = igText,
+                                titleHint = customTitle.ifBlank { scrapedTitle },
+                                apiKey = geminiKey,
+                                model = geminiModel,
+                                userSummary = userSummary,
+                                detailLevel = detailLevel,
+                                processId = processId
+                            )
+                        } else {
+                            throw IllegalStateException("無法下載影片，請確認連結是否有效或是否需要登入。")
+                        }
+                    } else {
+                        checkCancelled(cancelled)
+                        onProgress("gemini", "上傳影片至 Gemini ($geminiModel) 進行多模態聽覺+視覺分析...")
+                        val fileUri = uploadToGeminiFileApi(videoFile, geminiKey, processId, cancelled)
+                        checkCancelled(cancelled)
+                        val combinedSummary = if (igOgDesc.isNotBlank()) {
+                            listOf("IG 貼文說明：$igOgDesc", userSummary).filter { it.isNotBlank() }.joinToString("\n")
+                        } else {
+                            userSummary
+                        }
+                        structured = analyzeMediaWithGemini(
+                            fileUri = fileUri,
+                            apiKey = geminiKey,
+                            model = geminiModel,
+                            userSummary = combinedSummary,
+                            detailLevel = detailLevel,
+                            processId = processId
+                        )
+
+                        checkCancelled(cancelled)
+                        onProgress("keyframes", "依 AI 時間戳在本機擷取重點畫面...")
+                        val keyPoints = structured.optJSONArray("key_points") ?: JSONArray()
+                        keyFrames = extractKeyFrames(videoFile, keyPoints, workDir, noteId, monthDir)
+                    }
+                }
             }
 
             checkCancelled(cancelled)
@@ -337,6 +486,148 @@ object EdgeHarvester {
         } finally {
             workDir.deleteRecursively()
         }
+    }
+
+    private fun fetchXPostData(url: String): JSONObject {
+        val m = Regex("""https?://(?:www\.|mobile\.)?(?:x\.com|twitter\.com)/[^/]+/status/(\d+)""").find(url.trim())
+            ?: throw IllegalArgumentException("無法從 X 網址解析推文 ID：$url")
+        val tweetId = m.groupValues[1]
+
+        // 1. Try Syndication API
+        try {
+            val req = Request.Builder()
+                .url("https://cdn.syndication.twimg.com/tweet-result?id=$tweetId&lang=zh-tw&token=x")
+                .addHeader("User-Agent", CHROME_UA)
+                .get()
+                .build()
+            http.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val data = JSONObject(resp.body?.string() ?: "{}")
+                    val text = data.optString("text", "").trim()
+                    if (text.isNotBlank()) {
+                        val user = data.optJSONObject("user") ?: JSONObject()
+                        val author = "${user.optString("name", "")} (@${user.optString("screen_name", "")})".trim()
+                        var fullText = text
+                        val quoted = data.optJSONObject("quoted_tweet")
+                        if (quoted != null && quoted.optString("text", "").isNotBlank()) {
+                            val qUser = quoted.optJSONObject("user")?.optString("screen_name", "") ?: ""
+                            fullText += "\n\n[引用 @$qUser]: ${quoted.optString("text", "")}"
+                        }
+                        var videoUrl = ""
+                        val variants = data.optJSONObject("video")?.optJSONArray("variants")
+                        if (variants != null) {
+                            for (i in 0 until variants.length()) {
+                                val v = variants.optJSONObject(i) ?: continue
+                                if (v.optString("type") == "video/mp4" && v.optString("src").isNotBlank()) {
+                                    videoUrl = v.optString("src")
+                                }
+                            }
+                        }
+                        return JSONObject()
+                            .put("author", author)
+                            .put("text", fullText)
+                            .put("video_url", videoUrl)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+
+        // 2. Fallback to FxTwitter API
+        try {
+            val req = Request.Builder()
+                .url("https://api.fxtwitter.com/status/$tweetId")
+                .addHeader("User-Agent", CHROME_UA)
+                .get()
+                .build()
+            http.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val tweet = JSONObject(resp.body?.string() ?: "{}").optJSONObject("tweet")
+                    val text = tweet?.optString("text", "")?.trim() ?: ""
+                    if (tweet != null && text.isNotBlank()) {
+                        val authorObj = tweet.optJSONObject("author") ?: JSONObject()
+                        val author = "${authorObj.optString("name", "")} (@${authorObj.optString("screen_name", "")})".trim()
+                        var videoUrl = ""
+                        val videos = tweet.optJSONObject("media")?.optJSONArray("videos")
+                        if (videos != null && videos.length() > 0) {
+                            videoUrl = videos.optJSONObject(0)?.optString("url", "") ?: ""
+                        }
+                        return JSONObject()
+                            .put("author", author)
+                            .put("text", text)
+                            .put("video_url", videoUrl)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+
+        throw IllegalStateException("無法從 X/Twitter 擷取推文 $tweetId，請確認貼文是否公開。")
+    }
+
+    private fun downloadDirectMp4(videoUrl: String, destFile: File, cancelled: AtomicBoolean): File? {
+        return try {
+            val req = Request.Builder()
+                .url(videoUrl)
+                .addHeader("User-Agent", CHROME_UA)
+                .get()
+                .build()
+            http.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                val body = resp.body ?: return null
+                var total = 0L
+                body.byteStream().use { input ->
+                    destFile.outputStream().use { out ->
+                        val buf = ByteArray(32768)
+                        while (true) {
+                            checkCancelled(cancelled)
+                            val n = input.read(buf)
+                            if (n <= 0) break
+                            total += n
+                            if (total > 48L * 1024L * 1024L) {
+                                destFile.delete()
+                                return null
+                            }
+                            out.write(buf, 0, n)
+                        }
+                    }
+                }
+            }
+            if (destFile.exists() && destFile.length() > 1024L) destFile else null
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun fetchMetaOpenGraph(url: String): Pair<String, String> {
+        return try {
+            val req = Request.Builder()
+                .url(url)
+                .addHeader("User-Agent", "facebookexternalhit/1.1")
+                .addHeader("Accept-Language", "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7")
+                .get()
+                .build()
+            http.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return "" to ""
+                val html = resp.body?.string() ?: return "" to ""
+                val title = extractMetaContent(html, "og:title")
+                val desc = extractMetaContent(html, "og:description")
+                    .ifBlank { extractMetaContent(html, "description", "name") }
+                title to desc
+            }
+        } catch (_: Exception) {
+            "" to ""
+        }
+    }
+
+    private fun extractMetaContent(html: String, prop: String, attr: String = "property"): String {
+        val esc = Regex.escape(prop)
+        val p1 = Regex("""<meta[^>]*\b$attr\s*=\s*["']$esc["'][^>]*\bcontent\s*=\s*["']([^"']*)["'][^>]*>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        val p2 = Regex("""<meta[^>]*\bcontent\s*=\s*["']([^"']*)["'][^>]*\b$attr\s*=\s*["']$esc["'][^>]*>""", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+        val raw = p1.find(html)?.groupValues?.get(1) ?: p2.find(html)?.groupValues?.get(1) ?: return ""
+        return unescapeHtml(raw).trim()
     }
 
     private fun extractYoutubeVideoId(url: String): String? {

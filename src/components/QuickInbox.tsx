@@ -266,7 +266,11 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
     try {
       const nativeClip = window.DaliNativeBridge?.readClipboardText?.();
       if (nativeClip && nativeClip.trim()) {
-        setSourceUrl(nativeClip.trim());
+        const trimmed = nativeClip.trim();
+        setSourceUrl(trimmed);
+        if (/^https?:\/\//i.test(trimmed)) {
+          setSourceType(detectUrlSourceType(trimmed));
+        }
         setNativeFailedUrl(null);
         return;
       }
@@ -274,6 +278,9 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
       const trimmed = clip.trim();
       if (trimmed) {
         setSourceUrl(trimmed);
+        if (/^https?:\/\//i.test(trimmed)) {
+          setSourceType(detectUrlSourceType(trimmed));
+        }
         setNativeFailedUrl(null);
       } else {
         setResult({ ok: false, text: '剪貼簿目前沒有文字內容。' });
@@ -350,10 +357,18 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
     const activeProvider = settings.aiProvider || 'gemini';
     const activeGeminiModel = settings.geminiModel || 'gemini-3.8-flash';
 
-    // 1. Native Android Edge Harvester path for video links (always on in APK)
+    // 1. Native Android Edge Harvester path for video & X/Threads links (always on in APK)
+    const lowUrl = sourceUrl.trim().toLowerCase();
+    const isNativeSocialUrl =
+      lowUrl.includes('x.com/') ||
+      lowUrl.includes('twitter.com/') ||
+      lowUrl.includes('threads.com/') ||
+      lowUrl.includes('threads.net/');
     if (
       isNative &&
-      (sourceType === 'youtube' || sourceType === 'ig_video') &&
+      (sourceType === 'youtube' ||
+        sourceType === 'ig_video' ||
+        (sourceType === 'article' && isNativeSocialUrl)) &&
       sourceUrl.trim()
     ) {
       const targetUrl = sourceUrl.trim();
