@@ -61,6 +61,8 @@ function detectUrlSourceType(url: string): 'youtube' | 'ig_video' | 'article' {
   if (low.includes('youtube.com') || low.includes('youtu.be')) return 'youtube';
   if (
     low.includes('instagram.com') ||
+    low.includes('facebook.com') ||
+    low.includes('fb.watch') ||
     low.includes('tiktok.com') ||
     low.includes('douyin.com') ||
     low.includes('bilibili.com')
@@ -72,9 +74,10 @@ function detectUrlSourceType(url: string): 'youtube' | 'ig_video' | 'article' {
 
 function getSmartUrlPlatformLabel(url: string): string {
   const low = url.trim().toLowerCase();
-  if (!low) return '支援 YouTube / IG / 抖音 / X / Threads / 網頁文章';
+  if (!low) return '支援 YouTube / IG / FB / 抖音 / X / Threads / 網頁文章';
   if (low.includes('youtube.com') || low.includes('youtu.be')) return '已自動辨識：YouTube 影音';
   if (low.includes('instagram.com')) return '已自動辨識：Instagram Reels / 貼文';
+  if (low.includes('facebook.com') || low.includes('fb.watch')) return '已自動辨識：Facebook 影片 / 貼文';
   if (low.includes('tiktok.com') || low.includes('douyin.com')) return '已自動辨識：抖音 / TikTok 短片';
   if (low.includes('bilibili.com')) return '已自動辨識：Bilibili 影音';
   if (low.includes('x.com/') || low.includes('twitter.com/')) return '已自動辨識：X (Twitter) 貼文／影片';

@@ -155,7 +155,7 @@ object EdgeHarvester {
             val lowUrl = sourceUrl.lowercase(Locale.US)
             val isXUrl = lowUrl.contains("x.com/") || lowUrl.contains("twitter.com/")
             val isThreadsUrl = lowUrl.contains("threads.com/") || lowUrl.contains("threads.net/")
-            val isIgUrl = lowUrl.contains("instagram.com/")
+            val isIgUrl = lowUrl.contains("instagram.com/") || lowUrl.contains("facebook.com/") || lowUrl.contains("fb.watch/")
 
             var structured = JSONObject()
             var keyFrames = JSONArray()
