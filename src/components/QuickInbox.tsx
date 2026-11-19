@@ -7,11 +7,14 @@ import {
 } from '../lib/githubApi';
 import { isNativeApkEnv, type NativeProgressEvent } from '../lib/nativeBridge';
 import {
+  GEMINI_MODEL_OPTIONS,
   isGithubConfigured,
   nowTaipeiIso,
   nowTaipeiStamp,
+  type AiProvider,
   type ByokSettings,
 } from '../lib/storage';
+import { IconPhone } from './LineIcons';
 
 type SourceKind =
   | 'screenshot'
@@ -98,6 +101,10 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
   const [detailLevel, setDetailLevel] = useState<'detailed' | 'concise'>(
     settings.defaultDetailLevel || 'detailed'
   );
+  const [aiProvider, setAiProvider] = useState<AiProvider>(settings.aiProvider || 'gemini');
+  const [geminiModel, setGeminiModel] = useState<string>(
+    settings.geminiModel || 'gemini-3.8-flash'
+  );
   const [files, setFiles] = useState<File[]>([]);
   const [useNativeHarvester, setUseNativeHarvester] = useState<boolean>(isNativeApkEnv());
   const [nativeProgress, setNativeProgress] = useState<NativeProgressEvent | null>(null);
@@ -119,13 +126,16 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
   // Receive Android ACTION_SEND shared URL or progress callbacks
   useEffect(() => {
     window.onDaliNativeProgress = (ev) => {
-      setNativeProgress(ev);
       if (ev.stage === 'done') {
+        setNativeProgress(null);
         setSubmitting(false);
         setResult({ ok: true, text: ev.message || '手機端解析與知識庫同步完成！' });
       } else if (ev.stage === 'error') {
+        setNativeProgress(null);
         setSubmitting(false);
         setResult({ ok: false, text: ev.message || '手機端解析失敗' });
+      } else {
+        setNativeProgress(ev);
       }
     };
     window.onDaliNativeShared = (payload) => {
@@ -248,6 +258,8 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
           tags,
           user_summary: userSummary.trim(),
           detail_level: detailLevel,
+          ai_provider: aiProvider,
+          gemini_model: geminiModel,
         })
       );
       return;
@@ -274,6 +286,8 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
             tags,
             user_summary: userSummary.trim(),
             detail_level: detailLevel,
+            ai_provider: aiProvider,
+            gemini_model: geminiModel,
             created_at: nowTaipeiIso(),
           };
           await putVaultFile(
@@ -395,6 +409,8 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
           tags,
           user_summary: userSummary.trim(),
           detail_level: detailLevel,
+          ai_provider: aiProvider,
+          gemini_model: geminiModel,
           asset_filename: assetFilename || undefined,
           created_at: nowTaipeiIso(),
         };
@@ -549,10 +565,13 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
         <form onSubmit={handleSubmit} className="space-y-4">
           {isNative && (sourceType === 'youtube' || sourceType === 'ig_video') && (
             <label className="dj-card p-3 flex items-center justify-between gap-2 text-xs cursor-pointer">
-              <div>
-                <div className="text-[#F4F4F0] font-medium">📱 手機端原生擷取（防封鎖＋即時截圖）</div>
+              <div className="space-y-0.5">
+                <div className="flex items-center gap-1.5 text-[#F4F4F0] font-medium">
+                  <IconPhone className="w-3.5 h-3.5 text-[#6FA88B] shrink-0" />
+                  <span>手機端原生擷取（防封鎖＋即時截圖）</span>
+                </div>
                 <div className="text-[10px] text-[#9A9E9C]">
-                  使用手機行動網路直接抓片＋Gemini 直讀＋FFmpeg 截圖寫回 Vault
+                  使用手機行動網路直接抓片與字幕，繞過雲端機房封鎖
                 </div>
               </div>
               <input
@@ -563,6 +582,54 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
               />
             </label>
           )}
+
+          {/* 分析引擎與模型選擇 */}
+          <div className="dj-card p-3 space-y-2">
+            <div className="text-[10px] tracking-[0.14em] text-[#9A9E9C] uppercase">
+              分析引擎與模型
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setAiProvider('gemini')}
+                className={`py-1.5 px-2 border text-[11px] transition-colors ${
+                  aiProvider === 'gemini'
+                    ? 'border-[#6FA88B] bg-[#6FA88B]/15 text-[#F4F4F0]'
+                    : 'border-[#252A2C] bg-[#0B0D0F] text-[#9A9E9C]'
+                }`}
+              >
+                Gemini API
+              </button>
+              <button
+                type="button"
+                onClick={() => setAiProvider('openrouter')}
+                className={`py-1.5 px-2 border text-[11px] transition-colors ${
+                  aiProvider === 'openrouter'
+                    ? 'border-[#6FA88B] bg-[#6FA88B]/15 text-[#F4F4F0]'
+                    : 'border-[#252A2C] bg-[#0B0D0F] text-[#9A9E9C]'
+                }`}
+              >
+                OpenRouter (openrouter/free)
+              </button>
+            </div>
+            {aiProvider === 'gemini' ? (
+              <select
+                value={geminiModel}
+                onChange={(e) => setGeminiModel(e.target.value)}
+                className="dj-input text-xs"
+              >
+                {GEMINI_MODEL_OPTIONS.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <div className="text-[10px] text-[#9A9E9C]">
+                將使用 OpenRouter 免費路由模型：<span className="text-[#6FA88B]">openrouter/free</span>
+              </div>
+            )}
+          </div>
 
           {sourceType === 'batch' ? (
             <div>

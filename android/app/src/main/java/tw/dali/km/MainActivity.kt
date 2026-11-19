@@ -2,12 +2,19 @@ package tw.dali.km
 
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.graphics.Color
 import android.os.Bundle
+import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -32,7 +39,32 @@ class MainActivity : AppCompatActivity() {
 
         handleShareIntent(intent)
 
+        val bgColor = Color.parseColor("#0B0D0F")
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = bgColor
+        window.navigationBarColor = bgColor
+
+        val container = FrameLayout(this).apply {
+            setBackgroundColor(bgColor)
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        WindowInsetsControllerCompat(window, container).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
+
+        ViewCompat.setOnApplyWindowInsetsListener(container) { view, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
+
         webView = WebView(this).apply {
+            setBackgroundColor(bgColor)
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.databaseEnabled = true
@@ -41,7 +73,15 @@ class MainActivity : AppCompatActivity() {
             webViewClient = WebViewClient()
             addJavascriptInterface(DaliBridge(), "DaliNativeBridge")
         }
-        setContentView(webView)
+
+        container.addView(
+            webView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        setContentView(container)
         webView.loadUrl(PWA_URL)
     }
 
@@ -70,7 +110,10 @@ class MainActivity : AppCompatActivity() {
     private fun loadNativeSettings(): NativeSettings {
         val sp = getSharedPreferences(PREFS, MODE_PRIVATE)
         return NativeSettings(
+            openrouterApiKey = sp.getString("openrouterApiKey", "") ?: "",
             geminiApiKey = sp.getString("geminiApiKey", "") ?: "",
+            aiProvider = sp.getString("aiProvider", "gemini") ?: "gemini",
+            geminiModel = sp.getString("geminiModel", "gemini-3.8-flash") ?: "gemini-3.8-flash",
             githubPat = sp.getString("githubPat", "") ?: "",
             githubOwner = sp.getString("githubOwner", "") ?: "",
             githubRepo = sp.getString("githubRepo", "dali-km-vault") ?: "dali-km-vault",
@@ -83,14 +126,17 @@ class MainActivity : AppCompatActivity() {
         fun isNativeApp(): Boolean = true
 
         @JavascriptInterface
-        fun getAppVersion(): String = "2.0.0"
+        fun getAppVersion(): String = "2.0.2"
 
         @JavascriptInterface
         fun syncSettings(settingsJson: String) {
             try {
                 val obj = JSONObject(settingsJson)
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putString("openrouterApiKey", obj.optString("openrouterApiKey", ""))
                     .putString("geminiApiKey", obj.optString("geminiApiKey", ""))
+                    .putString("aiProvider", obj.optString("aiProvider", "gemini"))
+                    .putString("geminiModel", obj.optString("geminiModel", "gemini-3.8-flash"))
                     .putString("githubPat", obj.optString("githubPat", ""))
                     .putString("githubOwner", obj.optString("githubOwner", ""))
                     .putString("githubRepo", obj.optString("githubRepo", "dali-km-vault"))

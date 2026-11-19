@@ -1,7 +1,14 @@
 import React, { useState } from 'react';
 import { testVaultConnection } from '../lib/githubApi';
 import { isNativeApkEnv } from '../lib/nativeBridge';
-import { clearSettings, DEFAULT_SETTINGS, saveSettings, type ByokSettings } from '../lib/storage';
+import {
+  clearSettings,
+  DEFAULT_SETTINGS,
+  GEMINI_MODEL_OPTIONS,
+  saveSettings,
+  type ByokSettings,
+} from '../lib/storage';
+import { IconPhone } from './LineIcons';
 
 interface SettingsViewProps {
   settings: ByokSettings;
@@ -57,8 +64,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ settings, onChange }
           BYOK 零後端模式：所有金鑰僅存放於本機 <span className="text-[#F4F4F0]">localStorage</span>，直接透過 HTTPS 與 GitHub、Gemini 及 OpenRouter 通訊。
         </div>
         {isNative && (
-          <div className="text-[#6FA88B] font-medium">
-            📱 已啟動「大里智慧王 Android 原生擷取外殼」（支援系統分享、無字幕影音直讀與抖音攔截）。
+          <div className="flex items-center gap-1.5 text-[#6FA88B] font-medium">
+            <IconPhone className="w-3.5 h-3.5 shrink-0" />
+            <span>已啟動「大里智慧王 Android 原生擷取外殼」（系統分享／無字幕直讀／抖音攔截）。</span>
           </div>
         )}
       </div>
@@ -119,6 +127,36 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ settings, onChange }
 
         <div>
           <label className="block text-[11px] tracking-[0.14em] text-[#9A9E9C] uppercase mb-1.5">
+            預設分析引擎
+          </label>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setDraft({ ...draft, aiProvider: 'gemini' })}
+              className={`py-2 px-3 border text-xs transition-colors ${
+                draft.aiProvider === 'gemini'
+                  ? 'border-[#6FA88B] bg-[#6FA88B]/15 text-[#F4F4F0]'
+                  : 'border-[#252A2C] bg-[#0B0D0F] text-[#9A9E9C]'
+              }`}
+            >
+              Gemini API（推薦）
+            </button>
+            <button
+              type="button"
+              onClick={() => setDraft({ ...draft, aiProvider: 'openrouter' })}
+              className={`py-2 px-3 border text-xs transition-colors ${
+                draft.aiProvider === 'openrouter'
+                  ? 'border-[#6FA88B] bg-[#6FA88B]/15 text-[#F4F4F0]'
+                  : 'border-[#252A2C] bg-[#0B0D0F] text-[#9A9E9C]'
+              }`}
+            >
+              OpenRouter (openrouter/free)
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-[11px] tracking-[0.14em] text-[#9A9E9C] uppercase mb-1.5">
             GEMINI API KEY（免費額度：影音直讀、事實查核、多頁 OCR）
           </label>
           <input
@@ -132,7 +170,24 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ settings, onChange }
 
         <div>
           <label className="block text-[11px] tracking-[0.14em] text-[#9A9E9C] uppercase mb-1.5">
-            OPENROUTER API KEY（:free 問答與備援用）
+            GEMINI 預設模型
+          </label>
+          <select
+            value={draft.geminiModel}
+            onChange={(e) => setDraft({ ...draft, geminiModel: e.target.value })}
+            className="dj-input text-xs"
+          >
+            {GEMINI_MODEL_OPTIONS.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-[11px] tracking-[0.14em] text-[#9A9E9C] uppercase mb-1.5">
+            OPENROUTER API KEY（固定使用 openrouter/free）
           </label>
           <input
             type="password"

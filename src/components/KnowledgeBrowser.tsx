@@ -12,6 +12,16 @@ import {
   type SearchIndexPayload,
 } from '../lib/kbTypes';
 import { isGithubConfigured, type ByokSettings } from '../lib/storage';
+import {
+  IconCheck,
+  IconCopy,
+  IconDownload,
+  IconFrame,
+  IconLink,
+  IconNote,
+  IconText,
+  IconWarn,
+} from './LineIcons';
 
 interface KnowledgeBrowserProps {
   settings: ByokSettings;
@@ -264,16 +274,18 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
             <button
               type="button"
               onClick={handleCopyLine}
-              className="text-[11px] px-2 py-1 border border-[#252A2C] text-[#9A9E9C] hover:border-[#6FA88B] hover:text-[#F4F4F0]"
+              className="flex items-center gap-1 text-[11px] px-2 py-1 border border-[#252A2C] text-[#9A9E9C] hover:border-[#6FA88B] hover:text-[#F4F4F0]"
             >
-              📋 複製 LINE
+              <IconCopy className="w-3 h-3" />
+              <span>複製 LINE</span>
             </button>
             <button
               type="button"
               onClick={handleDownloadMd}
-              className="text-[11px] px-2 py-1 border border-[#252A2C] text-[#9A9E9C] hover:border-[#6FA88B] hover:text-[#F4F4F0]"
+              className="flex items-center gap-1 text-[11px] px-2 py-1 border border-[#252A2C] text-[#9A9E9C] hover:border-[#6FA88B] hover:text-[#F4F4F0]"
             >
-              ⬇ .md
+              <IconDownload className="w-3 h-3" />
+              <span>.md</span>
             </button>
           </div>
         </div>
@@ -300,14 +312,16 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
           </h2>
 
           {structured?.one_line_summary && (
-            <div className="p-2.5 bg-[#6FA88B]/10 border-l-2 border-l-[#6FA88B] text-xs text-[#E8ECEA] leading-relaxed">
-              💡 {structured.one_line_summary}
+            <div className="flex items-start gap-2 p-2.5 bg-[#6FA88B]/10 border-l-2 border-l-[#6FA88B] text-xs text-[#E8ECEA] leading-relaxed">
+              <IconNote className="w-3.5 h-3.5 text-[#6FA88B] shrink-0 mt-0.5" />
+              <span>{structured.one_line_summary}</span>
             </div>
           )}
 
           {structured?.limited_note && (
-            <div className="p-2.5 bg-[#D4A67A]/10 border-l-2 border-l-[#D4A67A] text-xs text-[#E8D5C4] leading-relaxed">
-              ⚠️ {structured.limited_note}
+            <div className="flex items-start gap-2 p-2.5 bg-[#D4A67A]/10 border-l-2 border-l-[#D4A67A] text-xs text-[#E8D5C4] leading-relaxed">
+              <IconWarn className="w-3.5 h-3.5 text-[#D4A67A] shrink-0 mt-0.5" />
+              <span>{structured.limited_note}</span>
             </div>
           )}
 
@@ -671,9 +685,10 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
                                 href={src.url}
                                 target="_blank"
                                 rel="noreferrer"
-                                className="text-[10px] text-[#6FA88B] underline truncate max-w-[200px]"
+                                className="inline-flex items-center gap-1 text-[10px] text-[#6FA88B] underline truncate max-w-[200px]"
                               >
-                                🔗 {src.title || src.url}
+                                <IconLink className="w-2.5 h-2.5 shrink-0" />
+                                <span className="truncate">{src.title || src.url}</span>
                               </a>
                             ))}
                           </div>
@@ -808,9 +823,24 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
               <p className="text-xs text-[#9A9E9C] line-clamp-2">{n.excerpt}</p>
               {(n.has_keyframes || n.has_transcript || n.has_fact_check) && (
                 <div className="flex flex-wrap gap-1.5 pt-0.5 text-[10px] text-[#9A9E9C]">
-                  {n.has_keyframes && <span className="px-1.5 py-0.5 border border-[#252A2C]">🖼 重點畫面</span>}
-                  {n.has_transcript && <span className="px-1.5 py-0.5 border border-[#252A2C]">📝 逐字稿</span>}
-                  {n.has_fact_check && <span className="px-1.5 py-0.5 border border-[#252A2C]">✅ 事實查核</span>}
+                  {n.has_keyframes && (
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 border border-[#252A2C]">
+                      <IconFrame className="w-2.5 h-2.5" />
+                      <span>重點畫面</span>
+                    </span>
+                  )}
+                  {n.has_transcript && (
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 border border-[#252A2C]">
+                      <IconText className="w-2.5 h-2.5" />
+                      <span>逐字稿</span>
+                    </span>
+                  )}
+                  {n.has_fact_check && (
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 border border-[#252A2C]">
+                      <IconCheck className="w-2.5 h-2.5" />
+                      <span>事實查核</span>
+                    </span>
+                  )}
                 </div>
               )}
             </button>

@@ -1,6 +1,18 @@
+export const GEMINI_MODEL_OPTIONS = [
+  { id: 'gemini-3.8-flash', label: 'gemini-3.8-flash（預設）' },
+  { id: 'gemini-3.6-flash', label: 'gemini-3.6-flash' },
+  { id: 'hydrogen', label: 'hydrogen' },
+  { id: 'gemini-3.5-flash-lite', label: 'gemini-3.5-flash-lite' },
+  { id: 'gemini-3.1-flash-lite', label: 'gemini-3.1-flash-lite' },
+] as const;
+
+export type AiProvider = 'gemini' | 'openrouter';
+
 export interface ByokSettings {
   openrouterApiKey: string;
   geminiApiKey: string;
+  aiProvider: AiProvider;
+  geminiModel: string;
   defaultDetailLevel: 'detailed' | 'concise';
   githubPat: string;
   githubOwner: string;
@@ -13,6 +25,8 @@ const STORAGE_KEY = 'kb_pwa_byok_settings_v1';
 export const DEFAULT_SETTINGS: ByokSettings = {
   openrouterApiKey: '',
   geminiApiKey: '',
+  aiProvider: 'gemini',
+  geminiModel: 'gemini-3.8-flash',
   defaultDetailLevel: 'detailed',
   githubPat: '',
   githubOwner: '',
@@ -28,6 +42,8 @@ export function loadSettings(): ByokSettings {
     return {
       openrouterApiKey: String(parsed.openrouterApiKey ?? ''),
       geminiApiKey: String(parsed.geminiApiKey ?? ''),
+      aiProvider: parsed.aiProvider === 'openrouter' ? 'openrouter' : 'gemini',
+      geminiModel: String(parsed.geminiModel || 'gemini-3.8-flash'),
       defaultDetailLevel: parsed.defaultDetailLevel === 'concise' ? 'concise' : 'detailed',
       githubPat: String(parsed.githubPat ?? ''),
       githubOwner: String(parsed.githubOwner ?? ''),

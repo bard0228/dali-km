@@ -89,9 +89,9 @@ export function formatNoteForLineShare(
   structured: StructuredPayload | null,
   fallbackBullets: string[] = []
 ): string {
-  const lines: string[] = [`📌 ${title}`];
+  const lines: string[] = [`[主題] ${title}`];
   if (structured?.one_line_summary) {
-    lines.push(`💡 ${structured.one_line_summary}`);
+    lines.push(`[結論] ${structured.one_line_summary}`);
   }
   lines.push('');
   const kps = structured?.key_points || [];
@@ -99,13 +99,13 @@ export function formatNoteForLineShare(
     kps.forEach((kp, idx) => {
       const ts = kp.timestamp ? `[${kp.timestamp}] ` : '';
       lines.push(`${idx + 1}. ${ts}${kp.point}`);
-      if (kp.detail) lines.push(`   ↳ ${kp.detail}`);
+      if (kp.detail) lines.push(`   - ${kp.detail}`);
     });
   } else if (fallbackBullets.length > 0) {
     fallbackBullets.forEach((b, idx) => lines.push(`${idx + 1}. ${b}`));
   }
   if (sourceUrl) {
-    lines.push('', `🔗 來源：${sourceUrl}`);
+    lines.push('', `來源：${sourceUrl}`);
   }
   return lines.join('\n');
 }
