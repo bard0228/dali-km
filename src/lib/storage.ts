@@ -40,15 +40,15 @@ export function loadSettings(): ByokSettings {
     if (!raw) return { ...DEFAULT_SETTINGS };
     const parsed = JSON.parse(raw) as Partial<ByokSettings>;
     return {
-      openrouterApiKey: String(parsed.openrouterApiKey ?? ''),
-      geminiApiKey: String(parsed.geminiApiKey ?? ''),
+      openrouterApiKey: String(parsed.openrouterApiKey ?? '').trim(),
+      geminiApiKey: String(parsed.geminiApiKey ?? '').trim(),
       aiProvider: parsed.aiProvider === 'openrouter' ? 'openrouter' : 'gemini',
-      geminiModel: String(parsed.geminiModel || 'gemini-3.8-flash'),
+      geminiModel: String(parsed.geminiModel || 'gemini-3.8-flash').trim(),
       defaultDetailLevel: parsed.defaultDetailLevel === 'concise' ? 'concise' : 'detailed',
-      githubPat: String(parsed.githubPat ?? ''),
-      githubOwner: String(parsed.githubOwner ?? ''),
-      githubRepo: String(parsed.githubRepo || 'dali-km-vault'),
-      githubBranch: String(parsed.githubBranch || 'main'),
+      githubPat: String(parsed.githubPat ?? '').trim(),
+      githubOwner: String(parsed.githubOwner ?? '').trim(),
+      githubRepo: String(parsed.githubRepo || 'dali-km-vault').trim(),
+      githubBranch: String(parsed.githubBranch || 'main').trim(),
     };
   } catch {
     return { ...DEFAULT_SETTINGS };
@@ -56,11 +56,21 @@ export function loadSettings(): ByokSettings {
 }
 
 export function saveSettings(settings: ByokSettings): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+  const clean: ByokSettings = {
+    ...settings,
+    openrouterApiKey: settings.openrouterApiKey.trim(),
+    geminiApiKey: settings.geminiApiKey.trim(),
+    geminiModel: (settings.geminiModel || 'gemini-3.8-flash').trim(),
+    githubPat: settings.githubPat.trim(),
+    githubOwner: settings.githubOwner.trim(),
+    githubRepo: (settings.githubRepo || 'dali-km-vault').trim(),
+    githubBranch: (settings.githubBranch || 'main').trim(),
+  };
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(clean));
   try {
     const bridge = (window as unknown as { DaliNativeBridge?: { syncSettings?: (s: string) => void } })
       .DaliNativeBridge;
-    bridge?.syncSettings?.(JSON.stringify(settings));
+    bridge?.syncSettings?.(JSON.stringify(clean));
   } catch {
     // ignore when running in regular browser
   }

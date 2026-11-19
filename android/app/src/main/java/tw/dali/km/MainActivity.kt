@@ -10,6 +10,8 @@ import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -17,16 +19,21 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import org.json.JSONObject
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var pendingSharedJson: String? = null
+    private var harvesterJob: Job? = null
+    private var currentProcessId: String? = null
+    private var harvesterCancelled = AtomicBoolean(false)
 
     companion object {
         private const val PWA_URL = "https://bard0228.github.io/dali-km/"
@@ -82,6 +89,31 @@ class MainActivity : AppCompatActivity() {
             )
         )
         setContentView(container)
+
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                webView.evaluateJavascript(
+                    "(window.handleDaliNativeBack && window.handleDaliNativeBack()) || false;"
+                ) { raw ->
+                    val handled = raw?.trim()?.equals("true", ignoreCase = true) == true
+                    if (handled) return@evaluateJavascript
+
+                    if (webView.canGoBack()) {
+                        webView.goBack()
+                    } else if (harvesterJob?.isActive == true) {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "分析將在背景繼續執行",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        moveTaskToBack(true)
+                    } else {
+                        finish()
+                    }
+                }
+            }
+        })
+
         webView.loadUrl(PWA_URL)
     }
 
@@ -110,15 +142,28 @@ class MainActivity : AppCompatActivity() {
     private fun loadNativeSettings(): NativeSettings {
         val sp = getSharedPreferences(PREFS, MODE_PRIVATE)
         return NativeSettings(
-            openrouterApiKey = sp.getString("openrouterApiKey", "") ?: "",
-            geminiApiKey = sp.getString("geminiApiKey", "") ?: "",
-            aiProvider = sp.getString("aiProvider", "gemini") ?: "gemini",
-            geminiModel = sp.getString("geminiModel", "gemini-3.8-flash") ?: "gemini-3.8-flash",
-            githubPat = sp.getString("githubPat", "") ?: "",
-            githubOwner = sp.getString("githubOwner", "") ?: "",
-            githubRepo = sp.getString("githubRepo", "dali-km-vault") ?: "dali-km-vault",
-            githubBranch = sp.getString("githubBranch", "main") ?: "main"
+            openrouterApiKey = (sp.getString("openrouterApiKey", "") ?: "").trim(),
+            geminiApiKey = (sp.getString("geminiApiKey", "") ?: "").trim(),
+            aiProvider = (sp.getString("aiProvider", "gemini") ?: "gemini").trim(),
+            geminiModel = (sp.getString("geminiModel", "gemini-3.8-flash") ?: "gemini-3.8-flash").trim(),
+            githubPat = (sp.getString("githubPat", "") ?: "").trim(),
+            githubOwner = (sp.getString("githubOwner", "") ?: "").trim(),
+            githubRepo = (sp.getString("githubRepo", "dali-km-vault") ?: "dali-km-vault").trim(),
+            githubBranch = (sp.getString("githubBranch", "main") ?: "main").trim()
         )
+    }
+
+    private fun emitProgress(stage: String, message: String) {
+        val evJson = JSONObject()
+            .put("stage", stage)
+            .put("message", message)
+            .toString()
+        runOnUiThread {
+            webView.evaluateJavascript(
+                "window.onDaliNativeProgress && window.onDaliNativeProgress($evJson);",
+                null
+            )
+        }
     }
 
     inner class DaliBridge {
@@ -126,21 +171,21 @@ class MainActivity : AppCompatActivity() {
         fun isNativeApp(): Boolean = true
 
         @JavascriptInterface
-        fun getAppVersion(): String = "2.0.2"
+        fun getAppVersion(): String = "2.0.3"
 
         @JavascriptInterface
         fun syncSettings(settingsJson: String) {
             try {
                 val obj = JSONObject(settingsJson)
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                    .putString("openrouterApiKey", obj.optString("openrouterApiKey", ""))
-                    .putString("geminiApiKey", obj.optString("geminiApiKey", ""))
-                    .putString("aiProvider", obj.optString("aiProvider", "gemini"))
-                    .putString("geminiModel", obj.optString("geminiModel", "gemini-3.8-flash"))
-                    .putString("githubPat", obj.optString("githubPat", ""))
-                    .putString("githubOwner", obj.optString("githubOwner", ""))
-                    .putString("githubRepo", obj.optString("githubRepo", "dali-km-vault"))
-                    .putString("githubBranch", obj.optString("githubBranch", "main"))
+                    .putString("openrouterApiKey", obj.optString("openrouterApiKey", "").trim())
+                    .putString("geminiApiKey", obj.optString("geminiApiKey", "").trim())
+                    .putString("aiProvider", obj.optString("aiProvider", "gemini").trim())
+                    .putString("geminiModel", obj.optString("geminiModel", "gemini-3.8-flash").trim())
+                    .putString("githubPat", obj.optString("githubPat", "").trim())
+                    .putString("githubOwner", obj.optString("githubOwner", "").trim())
+                    .putString("githubRepo", obj.optString("githubRepo", "dali-km-vault").trim())
+                    .putString("githubBranch", obj.optString("githubBranch", "main").trim())
                     .apply()
             } catch (_: Exception) {
             }
@@ -154,30 +199,46 @@ class MainActivity : AppCompatActivity() {
         }
 
         @JavascriptInterface
+        fun cancelEdgeHarvester() {
+            harvesterCancelled.set(true)
+            val pid = currentProcessId
+            currentProcessId = null
+            harvesterJob?.cancel()
+            harvesterJob = null
+            EdgeHarvester.cancel(pid)
+            emitProgress("cancelled", "使用者已手動停止分析。")
+        }
+
+        @JavascriptInterface
         fun processUrlInEdgeHarvester(payloadJson: String) {
+            // Cancel any stale running job cleanly before starting a new one
+            harvesterCancelled.set(true)
+            EdgeHarvester.cancel(currentProcessId)
+            harvesterJob?.cancel()
+
             val settings = loadNativeSettings()
-            scope.launch {
+            val cancelFlag = AtomicBoolean(false)
+            val processId = "dali_${System.currentTimeMillis()}"
+            harvesterCancelled = cancelFlag
+            currentProcessId = processId
+
+            harvesterJob = scope.launch {
                 EdgeHarvester.processUrl(
                     context = applicationContext,
                     settings = settings,
-                    payloadJson = payloadJson
+                    payloadJson = payloadJson,
+                    processId = processId,
+                    cancelled = cancelFlag
                 ) { stage, message ->
-                    val evJson = JSONObject()
-                        .put("stage", stage)
-                        .put("message", message)
-                        .toString()
-                    runOnUiThread {
-                        webView.evaluateJavascript(
-                            "window.onDaliNativeProgress && window.onDaliNativeProgress($evJson);",
-                            null
-                        )
-                    }
+                    emitProgress(stage, message)
                 }
             }
         }
     }
 
     override fun onDestroy() {
+        harvesterCancelled.set(true)
+        EdgeHarvester.cancel(currentProcessId)
         scope.cancel()
         super.onDestroy()
     }

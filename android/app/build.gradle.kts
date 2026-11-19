@@ -11,8 +11,8 @@ android {
         applicationId = "tw.dali.km"
         minSdk = 26
         targetSdk = 35
-        versionCode = 200
-        versionName = "2.0.0"
+        versionCode = 203
+        versionName = "2.0.3"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")

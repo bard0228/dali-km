@@ -28,6 +28,7 @@ interface KnowledgeBrowserProps {
   selectedNoteId?: string | null;
   onClearSelectedNote?: () => void;
   onGoSettings: () => void;
+  onRegisterBackHandler?: (handler: () => boolean) => void;
 }
 
 const TYPE_FILTERS = [
@@ -59,6 +60,7 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
   selectedNoteId,
   onClearSelectedNote,
   onGoSettings,
+  onRegisterBackHandler,
 }) => {
   const [indexData, setIndexData] = useState<SearchIndexPayload | null>(null);
   const [loading, setLoading] = useState(false);
@@ -101,6 +103,20 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
   useEffect(() => {
     fetchIndex();
   }, [fetchIndex]);
+
+  useEffect(() => {
+    onRegisterBackHandler?.(() => {
+      if (lightboxUrl) {
+        setLightboxUrl(null);
+        return true;
+      }
+      if (activeNote) {
+        setActiveNote(null);
+        return true;
+      }
+      return false;
+    });
+  }, [onRegisterBackHandler, lightboxUrl, activeNote]);
 
   useEffect(() => {
     return () => {

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { AskView } from './components/AskView';
 import { KnowledgeBrowser } from './components/KnowledgeBrowser';
 import { MaskedText } from './components/MaskedText';
@@ -22,17 +22,62 @@ export const App: React.FC = () => {
   const [settings, setSettings] = useState<ByokSettings>(() => loadSettings());
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const prevIdxRef = useRef(0);
+  const tabHistoryRef = useRef<TabKey[]>([]);
+  const browseBackRef = useRef<() => boolean>(() => false);
 
   useEffect(() => {
     return attachAndroidEdgeStretch();
   }, []);
 
-  const switchTab = (next: TabKey) => {
-    const nextIdx = TABS.findIndex((t) => t.key === next);
-    setSlideDir(nextIdx >= prevIdxRef.current ? 'right' : 'left');
-    prevIdxRef.current = nextIdx;
-    setActiveTab(next);
-  };
+  // Always keep Android native SharedPreferences synced with PWA localStorage settings
+  useEffect(() => {
+    try {
+      window.DaliNativeBridge?.syncSettings?.(JSON.stringify(settings));
+    } catch {
+      // ignore outside APK
+    }
+  }, [settings]);
+
+  const switchTab = useCallback(
+    (next: TabKey, recordHistory = true) => {
+      if (next === activeTab) return;
+      if (recordHistory) {
+        tabHistoryRef.current = [...tabHistoryRef.current.slice(-9), activeTab];
+      }
+      const nextIdx = TABS.findIndex((t) => t.key === next);
+      setSlideDir(nextIdx >= prevIdxRef.current ? 'right' : 'left');
+      prevIdxRef.current = nextIdx;
+      setActiveTab(next);
+    },
+    [activeTab]
+  );
+
+  // Android system back gesture handler
+  useEffect(() => {
+    window.handleDaliNativeBack = () => {
+      if (activeTab === 'browse' && browseBackRef.current()) {
+        return true;
+      }
+      if (tabHistoryRef.current.length > 0) {
+        const prev = tabHistoryRef.current[tabHistoryRef.current.length - 1];
+        tabHistoryRef.current = tabHistoryRef.current.slice(0, -1);
+        switchTab(prev, false);
+        return true;
+      }
+      if (activeTab !== 'inbox') {
+        switchTab('inbox', false);
+        return true;
+      }
+      return false;
+    };
+    return () => {
+      delete window.handleDaliNativeBack;
+    };
+  }, [activeTab, switchTab]);
+
+  const registerBrowseBackHandler = useCallback((handler: () => boolean) => {
+    browseBackRef.current = handler;
+  }, []);
 
   const handleOpenCitation = (noteId: string) => {
     setSelectedNoteId(noteId);
@@ -40,6 +85,7 @@ export const App: React.FC = () => {
   };
 
   const activeIndex = TABS.findIndex((t) => t.key === activeTab) + 1;
+  const animClass = slideDir === 'right' ? 'dj-enter-right' : 'dj-enter-left';
 
   return (
     <div id="app-shell" className="min-h-screen flex flex-col max-w-[460px] mx-auto relative">
@@ -57,40 +103,40 @@ export const App: React.FC = () => {
         </p>
       </header>
 
-      {/* Main Content */}
+      {/* Main Content — keep QuickInbox & KnowledgeBrowser mounted so background analysis & state never reset across tab switches */}
       <main className="flex-1 px-5 py-5 pb-28">
-        <div
-          key={activeTab}
-          className={slideDir === 'right' ? 'dj-enter-right' : 'dj-enter-left'}
-        >
-          {activeTab === 'inbox' && (
-            <QuickInbox
-              settings={settings}
-              onGoSettings={() => switchTab('settings')}
-            />
-          )}
+        <div className={activeTab === 'inbox' ? animClass : 'hidden'}>
+          <QuickInbox
+            settings={settings}
+            onGoSettings={() => switchTab('settings')}
+          />
+        </div>
 
-          {activeTab === 'browse' && (
-            <KnowledgeBrowser
-              settings={settings}
-              selectedNoteId={selectedNoteId}
-              onClearSelectedNote={() => setSelectedNoteId(null)}
-              onGoSettings={() => switchTab('settings')}
-            />
-          )}
+        <div className={activeTab === 'browse' ? animClass : 'hidden'}>
+          <KnowledgeBrowser
+            settings={settings}
+            selectedNoteId={selectedNoteId}
+            onClearSelectedNote={() => setSelectedNoteId(null)}
+            onGoSettings={() => switchTab('settings')}
+            onRegisterBackHandler={registerBrowseBackHandler}
+          />
+        </div>
 
-          {activeTab === 'ask' && (
+        {activeTab === 'ask' && (
+          <div key="ask" className={animClass}>
             <AskView
               settings={settings}
               onOpenCitation={handleOpenCitation}
               onGoSettings={() => switchTab('settings')}
             />
-          )}
+          </div>
+        )}
 
-          {activeTab === 'settings' && (
+        {activeTab === 'settings' && (
+          <div key="settings" className={animClass}>
             <SettingsView settings={settings} onChange={setSettings} />
-          )}
-        </div>
+          </div>
+        )}
       </main>
 
       {/* Dark Liquid Glass Bottom Navigation */}

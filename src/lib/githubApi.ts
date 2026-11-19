@@ -70,7 +70,8 @@ export async function putVaultFile(
   settings: ByokSettings,
   repoPath: string,
   base64Content: string,
-  commitMessage: string
+  commitMessage: string,
+  signal?: AbortSignal
 ): Promise<void> {
   const owner = settings.githubOwner.trim();
   const repo = settings.githubRepo.trim();
@@ -82,6 +83,7 @@ export async function putVaultFile(
   let existingSha: string | undefined;
   const checkRes = await fetch(`${url}?ref=${encodeURIComponent(branch)}`, {
     headers: ghHeaders(settings.githubPat),
+    signal,
   });
   if (checkRes.ok) {
     const existing = (await checkRes.json()) as { sha?: string };
@@ -104,6 +106,7 @@ export async function putVaultFile(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
+    signal,
   });
 
   if (!res.ok) {
@@ -114,7 +117,8 @@ export async function putVaultFile(
 
 export async function triggerIngestWorkflow(
   settings: ByokSettings,
-  noteHint = ''
+  noteHint = '',
+  signal?: AbortSignal
 ): Promise<void> {
   const owner = settings.githubOwner.trim();
   const repo = settings.githubRepo.trim();
@@ -134,6 +138,7 @@ export async function triggerIngestWorkflow(
         note_hint: noteHint.slice(0, 120),
       },
     }),
+    signal,
   });
 
   if (!res.ok && res.status !== 204) {
@@ -142,7 +147,10 @@ export async function triggerIngestWorkflow(
   }
 }
 
-export async function triggerFollowWorkflow(settings: ByokSettings): Promise<void> {
+export async function triggerFollowWorkflow(
+  settings: ByokSettings,
+  signal?: AbortSignal
+): Promise<void> {
   const owner = settings.githubOwner.trim();
   const repo = settings.githubRepo.trim();
   const branch = settings.githubBranch.trim() || 'main';
@@ -155,6 +163,7 @@ export async function triggerFollowWorkflow(settings: ByokSettings): Promise<voi
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ ref: branch }),
+    signal,
   });
 
   if (!res.ok && res.status !== 204) {

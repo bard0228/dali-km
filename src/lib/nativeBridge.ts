@@ -4,10 +4,19 @@ export interface DaliNativeBridgeApi {
   syncSettings?: (settingsJson: string) => void;
   consumeSharedPayload?: () => string;
   processUrlInEdgeHarvester?: (payloadJson: string) => void;
+  cancelEdgeHarvester?: () => void;
 }
 
 export interface NativeProgressEvent {
-  stage: 'fetching' | 'downloading' | 'gemini' | 'keyframes' | 'uploading' | 'done' | 'error';
+  stage:
+    | 'fetching'
+    | 'downloading'
+    | 'gemini'
+    | 'keyframes'
+    | 'uploading'
+    | 'done'
+    | 'cancelled'
+    | 'error';
   message: string;
   noteId?: string;
   url?: string;
@@ -18,6 +27,7 @@ declare global {
     DaliNativeBridge?: DaliNativeBridgeApi;
     onDaliNativeProgress?: (ev: NativeProgressEvent) => void;
     onDaliNativeShared?: (payload: { url?: string; text?: string }) => void;
+    handleDaliNativeBack?: () => boolean;
   }
 }
 

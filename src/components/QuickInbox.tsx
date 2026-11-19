@@ -113,6 +113,8 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
   const [batchLogs, setBatchLogs] = useState<string[]>([]);
   const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const activeNativeRef = useRef(false);
 
   // Follow channel state
   const [channels, setChannels] = useState<FollowedChannel[]>([]);
@@ -123,14 +125,29 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
   const configured = isGithubConfigured(settings);
   const isNative = isNativeApkEnv();
 
+  // Keep local defaults aligned with 04 設定 when not actively running a job
+  useEffect(() => {
+    if (submitting) return;
+    setAiProvider(settings.aiProvider || 'gemini');
+    setGeminiModel(settings.geminiModel || 'gemini-3.8-flash');
+    setDetailLevel(settings.defaultDetailLevel || 'detailed');
+  }, [settings.aiProvider, settings.geminiModel, settings.defaultDetailLevel, submitting]);
+
   // Receive Android ACTION_SEND shared URL or progress callbacks
   useEffect(() => {
     window.onDaliNativeProgress = (ev) => {
       if (ev.stage === 'done') {
+        activeNativeRef.current = false;
         setNativeProgress(null);
         setSubmitting(false);
         setResult({ ok: true, text: ev.message || '手機端解析與知識庫同步完成！' });
+      } else if (ev.stage === 'cancelled') {
+        activeNativeRef.current = false;
+        setNativeProgress(null);
+        setSubmitting(false);
+        setResult({ ok: false, text: ev.message || '已手動停止分析。' });
       } else if (ev.stage === 'error') {
+        activeNativeRef.current = false;
         setNativeProgress(null);
         setSubmitting(false);
         setResult({ ok: false, text: ev.message || '手機端解析失敗' });
@@ -228,12 +245,33 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
     await handleSaveChannels(next, false);
   };
 
+  const handleCancelAnalysis = () => {
+    if (!submitting) return;
+    if (activeNativeRef.current) {
+      setNativeProgress({ stage: 'fetching', message: '正在停止手機端分析...' });
+      try {
+        window.DaliNativeBridge?.cancelEdgeHarvester?.();
+      } catch {
+        activeNativeRef.current = false;
+        setNativeProgress(null);
+        setSubmitting(false);
+        setResult({ ok: false, text: '已手動停止分析。' });
+      }
+      return;
+    }
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    setSubmitting(false);
+    setResult({ ok: false, text: '已手動停止分析。' });
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!configured) {
       onGoSettings();
       return;
     }
+    if (submitting) return;
 
     const tags = tagsText
       .split(/[,，]/)
@@ -247,9 +285,15 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
       (sourceType === 'youtube' || sourceType === 'ig_video') &&
       sourceUrl.trim()
     ) {
+      activeNativeRef.current = true;
       setSubmitting(true);
       setResult(null);
       setNativeProgress({ stage: 'fetching', message: '正在喚起手機端原生擷取引擎...' });
+      try {
+        window.DaliNativeBridge?.syncSettings?.(JSON.stringify(settings));
+      } catch {
+        // ignore
+      }
       window.DaliNativeBridge?.processUrlInEdgeHarvester?.(
         JSON.stringify({
           source_type: sourceType,
@@ -271,12 +315,15 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
         setResult({ ok: false, text: '請在下方貼上至少一個有效的 http(s):// 連結。' });
         return;
       }
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
       setSubmitting(true);
       setResult(null);
       setBatchLogs([]);
       try {
         const stamp = nowTaipeiStamp();
         for (let i = 0; i < parsedUrlsFromBatch.length; i++) {
+          if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
           const u = parsedUrlsFromBatch[i];
           const detected = detectUrlSourceType(u);
           setBatchLogs((prev) => [...prev, `[${i + 1}/${parsedUrlsFromBatch.length}] 排入 ${detected}: ${u}`]);
@@ -294,18 +341,26 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
             settings,
             `inbox/pending/${stamp}_batch_${i + 1}.json`,
             stringToBase64(JSON.stringify(taskJson, null, 2)),
-            `inbox(batch): queue ${detected} #${i + 1}`
+            `inbox(batch): queue ${detected} #${i + 1}`,
+            controller.signal
           );
         }
-        await triggerIngestWorkflow(settings, `batch:${parsedUrlsFromBatch.length}`);
+        await triggerIngestWorkflow(settings, `batch:${parsedUrlsFromBatch.length}`, controller.signal);
         setBatchText('');
         setResult({
           ok: true,
           text: `已將 ${parsedUrlsFromBatch.length} 筆連結寫入佇列並觸發雲端管線！`,
         });
       } catch (err) {
-        setResult({ ok: false, text: err instanceof Error ? err.message : '批次投遞失敗' });
+        if ((err instanceof DOMException && err.name === 'AbortError') || controller.signal.aborted) {
+          setResult({ ok: false, text: '已手動停止分析。' });
+        } else {
+          setResult({ ok: false, text: err instanceof Error ? err.message : '批次投遞失敗' });
+        }
       } finally {
+        if (abortControllerRef.current === controller) {
+          abortControllerRef.current = null;
+        }
         setSubmitting(false);
       }
       return;
@@ -329,6 +384,8 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
       return;
     }
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     setSubmitting(true);
     setResult(null);
 
@@ -340,7 +397,7 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
         const safeName = `${stamp}_${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
         const assetPath = `inbox/pending/${safeName}`;
         const b64 = await fileToBase64(file);
-        await putVaultFile(settings, assetPath, b64, `inbox(book): upload ${safeName}`);
+        await putVaultFile(settings, assetPath, b64, `inbox(book): upload ${safeName}`, controller.signal);
         if (userSummary.trim() || title.trim() || tags.length > 0) {
           const meta = {
             title: title.trim() || undefined,
@@ -352,19 +409,21 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
             settings,
             `${assetPath}.meta.json`,
             stringToBase64(JSON.stringify(meta, null, 2)),
-            `inbox(book): sidecar meta for ${safeName}`
+            `inbox(book): sidecar meta for ${safeName}`,
+            controller.signal
           );
         }
-        await triggerIngestWorkflow(settings, `book:${safeName}`);
+        await triggerIngestWorkflow(settings, `book:${safeName}`, controller.signal);
         setResult({ ok: true, text: `已上傳電子書 ${safeName} 並觸發雲端解析管線。` });
       } else if (sourceType === 'document_ocr') {
         const uploadedNames: string[] = [];
         for (let i = 0; i < files.length; i++) {
+          if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
           const f = files[i];
           const ext = f.name.split('.').pop()?.toLowerCase() || 'jpg';
           const fname = `${stamp}_p${i + 1}.${ext}`;
           const b64 = await fileToBase64(f);
-          await putVaultFile(settings, `inbox/pending/${fname}`, b64, `inbox(ocr): page ${i + 1}`);
+          await putVaultFile(settings, `inbox/pending/${fname}`, b64, `inbox(ocr): page ${i + 1}`, controller.signal);
           uploadedNames.push(fname);
         }
         const taskJson = {
@@ -379,9 +438,10 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
           settings,
           `inbox/pending/${stamp}_doc_ocr.json`,
           stringToBase64(JSON.stringify(taskJson, null, 2)),
-          `inbox(document_ocr): ${uploadedNames.length} pages`
+          `inbox(document_ocr): ${uploadedNames.length} pages`,
+          controller.signal
         );
-        await triggerIngestWorkflow(settings, `document_ocr:${uploadedNames.length}p`);
+        await triggerIngestWorkflow(settings, `document_ocr:${uploadedNames.length}p`, controller.signal);
         setResult({
           ok: true,
           text: `已上傳 ${uploadedNames.length} 頁文件並觸發多頁 OCR 合併整理！`,
@@ -397,7 +457,8 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
             settings,
             `inbox/pending/${assetFilename}`,
             b64,
-            `inbox(${sourceType}): upload ${assetFilename}`
+            `inbox(${sourceType}): upload ${assetFilename}`,
+            controller.signal
           );
         }
 
@@ -419,9 +480,14 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
           settings,
           taskPath,
           stringToBase64(JSON.stringify(taskJson, null, 2)),
-          `inbox(${sourceType}): queue task ${stamp}`
+          `inbox(${sourceType}): queue task ${stamp}`,
+          controller.signal
         );
-        await triggerIngestWorkflow(settings, `${sourceType}:${bookQuery.trim() || sourceUrl.trim()}`);
+        await triggerIngestWorkflow(
+          settings,
+          `${sourceType}:${bookQuery.trim() || sourceUrl.trim()}`,
+          controller.signal
+        );
         setResult({
           ok: true,
           text: `已寫入 ${taskPath} 並觸發雲端解析管線（約 1~2 分鐘後至「02 檢索」查看）。`,
@@ -436,11 +502,18 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
       setFiles([]);
       if (fileInputRef.current) fileInputRef.current.value = '';
     } catch (err) {
-      setResult({
-        ok: false,
-        text: err instanceof Error ? err.message : '投遞失敗',
-      });
+      if ((err instanceof DOMException && err.name === 'AbortError') || controller.signal.aborted) {
+        setResult({ ok: false, text: '已手動停止分析。' });
+      } else {
+        setResult({
+          ok: false,
+          text: err instanceof Error ? err.message : '投遞失敗',
+        });
+      }
     } finally {
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+      }
       setSubmitting(false);
     }
   };
@@ -778,17 +851,33 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
             </div>
           )}
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="dj-btn dj-btn-primary w-full"
-          >
-            {submitting
-              ? '處理中...'
-              : sourceType === 'batch'
-              ? `批次投遞 ${parsedUrlsFromBatch.length} 筆連結`
-              : '送出並開始分析'}
-          </button>
+          {submitting ? (
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                disabled
+                className="dj-btn dj-btn-primary w-full opacity-70"
+              >
+                處理中...
+              </button>
+              <button
+                type="button"
+                onClick={handleCancelAnalysis}
+                className="dj-btn w-full border border-[#D47A7A]/70 text-[#D47A7A] hover:bg-[#D47A7A]/10"
+              >
+                停止分析
+              </button>
+            </div>
+          ) : (
+            <button
+              type="submit"
+              className="dj-btn dj-btn-primary w-full"
+            >
+              {sourceType === 'batch'
+                ? `批次投遞 ${parsedUrlsFromBatch.length} 筆連結`
+                : '送出並開始分析'}
+            </button>
+          )}
         </form>
       )}
     </section>
