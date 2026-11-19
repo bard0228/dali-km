@@ -5,6 +5,7 @@ export interface DaliNativeBridgeApi {
   consumeSharedPayload?: () => string;
   processUrlInEdgeHarvester?: (payloadJson: string) => void;
   cancelEdgeHarvester?: () => void;
+  readClipboardText?: () => string;
 }
 
 export interface NativeProgressEvent {

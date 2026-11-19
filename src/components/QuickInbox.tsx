@@ -264,6 +264,12 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
 
   const handlePasteUrl = async () => {
     try {
+      const nativeClip = window.DaliNativeBridge?.readClipboardText?.();
+      if (nativeClip && nativeClip.trim()) {
+        setSourceUrl(nativeClip.trim());
+        setNativeFailedUrl(null);
+        return;
+      }
       const clip = await navigator.clipboard.readText();
       const trimmed = clip.trim();
       if (trimmed) {

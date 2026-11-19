@@ -209,6 +209,7 @@ object EdgeHarvester {
                         processId = processId
                     )
                 }
+                structured.put("transcript", buildTranscriptFromSubtitles(subtitleText))
             } else {
                 // 2. Fallback: download video + Gemini multimodal analysis
                 if (geminiKey.isBlank()) {
@@ -303,7 +304,26 @@ object EdgeHarvester {
                 processId = processId
             )
 
-            triggerRebuildIndex(settings, processId)
+            val indexUpdated = updateSearchIndexImmediate(
+                settings = settings,
+                noteId = noteId,
+                title = finalTitle,
+                sourceType = sourceType,
+                category = finalCat,
+                tags = mergedTags,
+                sourceUrl = sourceUrl,
+                rawAssets = rawAssets,
+                userSummary = userSummary,
+                oneLineSummary = structured.optString("one_line_summary", ""),
+                hasKeyframes = keyFrames.length() > 0,
+                hasTranscript = (structured.optJSONArray("transcript")?.length() ?: 0) > 0,
+                createdAt = createdAt,
+                structured = structured,
+                processId = processId
+            )
+            if (!indexUpdated) {
+                triggerRebuildIndex(settings, processId)
+            }
             val kfNote = if (keyFrames.length() > 0) "與 ${keyFrames.length()} 張重點畫面" else ""
             onProgress("done", "完成！筆記「$finalTitle」$kfNote 已同步至知識庫。")
         } catch (ce: CancellationException) {
@@ -682,8 +702,7 @@ object EdgeHarvester {
               "key_points": [
                 {"section": "段落名稱", "point": "精煉重點", "detail": "1~3句補充說明", "timestamp": "MM:SS"}
               ],
-              "key_info": [{"label": "關鍵數據/工具/人名", "value": "內容"}],
-              "transcript": [{"t": "MM:SS", "s": "", "x": "重點逐字稿片段（繁體中文）"}]
+              "key_info": [{"label": "關鍵數據/工具/人名", "value": "內容"}]
             }
             要求：key_points 請列出 $countHint 並附正確 timestamp（MM:SS）。
             
@@ -923,9 +942,9 @@ object EdgeHarvester {
                 {"section": "段落名稱", "point": "精煉重點", "detail": "1~3句補充說明", "timestamp": "MM:SS"}
               ],
               "key_info": [{"label": "關鍵數據/工具/人名", "value": "內容"}],
-              "transcript": [{"t": "MM:SS", "s": "", "x": "逐字稿內容（繁體中文或原語言）"}]
+              "transcript": [{"t": "MM:SS", "s": "", "x": "完整逐字稿段落（依時間分段，勿只寫摘要片段）"}]
             }
-            要求：key_points 請列出 $countHint 並附正確 timestamp（MM:SS）。
+            要求：key_points 請列出 $countHint 並附正確 timestamp（MM:SS）；transcript 請依影片時間軸（約每 15~30 秒一段）盡可能完整記錄講者逐字內容。
         """.trimIndent()
 
         val body = JSONObject().put(
@@ -1059,6 +1078,183 @@ object EdgeHarvester {
                 throw IllegalStateException("GitHub 上傳失敗 HTTP ${resp.code}: ${resp.body?.string()}")
             }
         }
+    }
+
+    private fun buildTranscriptFromSubtitles(subtitleText: String): JSONArray {
+        val result = JSONArray()
+        val lineRx = Regex("""^\[(\d{1,3}:\d{2})\]\s*(.+)$""")
+        var paraTs = ""
+        var paraStartSec = 0
+        val paraBuf = StringBuilder()
+
+        fun flushPara() {
+            val txt = paraBuf.toString().trim()
+            if (txt.isNotEmpty()) {
+                result.put(
+                    JSONObject()
+                        .put("t", paraTs.ifBlank { "00:00" })
+                        .put("s", "")
+                        .put("x", txt)
+                )
+            }
+            paraBuf.setLength(0)
+        }
+
+        for (rawLine in subtitleText.lines()) {
+            val trimmed = rawLine.trim()
+            if (trimmed.isEmpty()) continue
+            val m = lineRx.find(trimmed)
+            val ts = m?.groupValues?.get(1) ?: paraTs.ifBlank { "00:00" }
+            val text = (m?.groupValues?.get(2) ?: trimmed).trim()
+            if (text.isEmpty()) continue
+            val sec = parseTimestampSeconds(ts) ?: paraStartSec
+
+            if (paraBuf.isEmpty()) {
+                paraTs = ts
+                paraStartSec = sec
+                paraBuf.append(text)
+            } else if ((sec - paraStartSec >= 20) || (paraBuf.length + text.length > 120)) {
+                flushPara()
+                paraTs = ts
+                paraStartSec = sec
+                paraBuf.append(text)
+            } else {
+                val lastChar = paraBuf.last()
+                val firstChar = text.first()
+                if (lastChar.code < 128 && firstChar.code < 128) {
+                    paraBuf.append(' ')
+                }
+                paraBuf.append(text)
+            }
+        }
+        flushPara()
+        return result
+    }
+
+    private fun updateSearchIndexImmediate(
+        settings: NativeSettings,
+        noteId: String,
+        title: String,
+        sourceType: String,
+        category: String,
+        tags: List<String>,
+        sourceUrl: String,
+        rawAssets: JSONArray,
+        userSummary: String,
+        oneLineSummary: String,
+        hasKeyframes: Boolean,
+        hasTranscript: Boolean,
+        createdAt: String,
+        structured: JSONObject,
+        processId: String
+    ): Boolean {
+        val idxUrl = "https://api.github.com/repos/${settings.githubOwner}/${settings.githubRepo}/contents/index/search-index.json"
+        val excerptSource = buildString {
+            if (oneLineSummary.isNotBlank()) append(oneLineSummary).append(" ")
+            val kps = structured.optJSONArray("key_points")
+            if (kps != null) {
+                for (i in 0 until minOf(3, kps.length())) {
+                    append(kps.getJSONObject(i).optString("point", "")).append(" ")
+                }
+            }
+        }.trim().take(180)
+
+        val newEntry = JSONObject()
+            .put("id", noteId)
+            .put("title", title)
+            .put("source_type", sourceType)
+            .put("status", "completed")
+            .put("category", category)
+            .put("tags", JSONArray(tags))
+            .put("source_url", sourceUrl)
+            .put("raw_assets", rawAssets)
+            .put("user_summary", userSummary)
+            .put("one_line_summary", oneLineSummary)
+            .put("has_keyframes", hasKeyframes)
+            .put("has_transcript", hasTranscript)
+            .put("has_fact_check", false)
+            .put("created_at", createdAt)
+            .put("path", "notes/$noteId.md")
+            .put("excerpt", excerptSource)
+
+        for (attempt in 0 until 2) {
+            try {
+                val getReq = Request.Builder()
+                    .url("$idxUrl?ref=${URLEncoder.encode(settings.githubBranch, "UTF-8")}&_t=${System.currentTimeMillis()}")
+                    .addHeader("Authorization", "Bearer ${settings.githubPat}")
+                    .addHeader("Accept", "application/vnd.github+json")
+                    .tag(processId)
+                    .get()
+                    .build()
+
+                var existingSha: String? = null
+                var existingNotes = JSONArray()
+                var version = 1
+
+                http.newCall(getReq).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val obj = JSONObject(resp.body?.string() ?: "{}")
+                        existingSha = obj.optString("sha", "").ifBlank { null }
+                        val b64 = obj.optString("content", "").replace("\\s".toRegex(), "")
+                        val jsonText = if (b64.isNotBlank()) {
+                            String(Base64.decode(b64, Base64.DEFAULT), Charsets.UTF_8)
+                        } else {
+                            val dlUrl = obj.optString("download_url", "")
+                            if (dlUrl.isNotBlank()) {
+                                val dlReq = Request.Builder().url(dlUrl).tag(processId).get().build()
+                                http.newCall(dlReq).execute().use { dlResp ->
+                                    if (dlResp.isSuccessful) dlResp.body?.string() ?: "{}" else "{}"
+                                }
+                            } else "{}"
+                        }
+                        val idxObj = JSONObject(jsonText)
+                        version = idxObj.optInt("version", 1)
+                        existingNotes = idxObj.optJSONArray("notes") ?: JSONArray()
+                    } else if (resp.code != 404) {
+                        return false
+                    }
+                }
+
+                val mergedNotes = JSONArray()
+                mergedNotes.put(newEntry)
+                for (i in 0 until existingNotes.length()) {
+                    val item = existingNotes.optJSONObject(i) ?: continue
+                    if (item.optString("id") != noteId) {
+                        mergedNotes.put(item)
+                    }
+                }
+
+                val updatedIndex = JSONObject()
+                    .put("version", version)
+                    .put("generated_at", createdAt)
+                    .put("total", mergedNotes.length())
+                    .put("notes", mergedNotes)
+
+                val putBody = JSONObject()
+                    .put("message", "chore(edge): update search-index.json for $noteId")
+                    .put("content", Base64.encodeToString((updatedIndex.toString(2) + "\n").toByteArray(Charsets.UTF_8), Base64.NO_WRAP))
+                    .put("branch", settings.githubBranch)
+                if (existingSha != null) {
+                    putBody.put("sha", existingSha)
+                }
+
+                val putReq = Request.Builder()
+                    .url(idxUrl)
+                    .addHeader("Authorization", "Bearer ${settings.githubPat}")
+                    .addHeader("Accept", "application/vnd.github+json")
+                    .tag(processId)
+                    .put(putBody.toString().toRequestBody("application/json".toMediaType()))
+                    .build()
+
+                http.newCall(putReq).execute().use { putResp ->
+                    if (putResp.isSuccessful) return true
+                    if (putResp.code != 409) return false
+                }
+            } catch (_: Exception) {
+                return false
+            }
+        }
+        return false
     }
 
     private fun triggerRebuildIndex(settings: NativeSettings, processId: String) {

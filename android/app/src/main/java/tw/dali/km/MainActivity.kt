@@ -1,6 +1,8 @@
 package tw.dali.km
 
 import android.annotation.SuppressLint
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
@@ -171,7 +173,22 @@ class MainActivity : AppCompatActivity() {
         fun isNativeApp(): Boolean = true
 
         @JavascriptInterface
-        fun getAppVersion(): String = "2.0.4"
+        fun getAppVersion(): String = "2.0.5"
+
+        @JavascriptInterface
+        fun readClipboardText(): String {
+            return try {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                val clip = cm?.primaryClip
+                if (clip != null && clip.itemCount > 0) {
+                    clip.getItemAt(0).coerceToText(this@MainActivity)?.toString()?.trim() ?: ""
+                } else {
+                    ""
+                }
+            } catch (_: Exception) {
+                ""
+            }
+        }
 
         @JavascriptInterface
         fun syncSettings(settingsJson: String) {

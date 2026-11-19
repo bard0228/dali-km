@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { getVaultFileText } from '../lib/githubApi';
 import {
   rankNotesByQuery,
@@ -50,6 +51,7 @@ export const AskView: React.FC<AskViewProps> = ({
     const init = loadAskHistory();
     return init[0] ? { [init[0].id]: true } : {};
   });
+  const [deleteTarget, setDeleteTarget] = useState<AskHistoryItem | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -66,14 +68,15 @@ export const AskView: React.FC<AskViewProps> = ({
     setExpandedIds((prev) => ({ ...prev, [id]: !prev[id] }));
   };
 
-  const handleClearHistory = () => {
-    setHistory([]);
-    setExpandedIds({});
-    try {
-      localStorage.removeItem(ASK_HISTORY_KEY);
-    } catch {
-      // ignore
-    }
+  const handleConfirmDelete = () => {
+    if (!deleteTarget) return;
+    setHistory((prev) => prev.filter((item) => item.id !== deleteTarget.id));
+    setExpandedIds((prev) => {
+      const next = { ...prev };
+      delete next[deleteTarget.id];
+      return next;
+    });
+    setDeleteTarget(null);
   };
 
   const handleAsk = async (e: React.FormEvent) => {
@@ -173,14 +176,6 @@ export const AskView: React.FC<AskViewProps> = ({
             <span className="text-[10px] tracking-[0.16em] text-[#9A9E9C] uppercase">
               問答紀錄（{history.length}，點擊問題展開解答）
             </span>
-            <button
-              type="button"
-              onClick={handleClearHistory}
-              className="inline-flex items-center gap-1 text-[10px] text-[#9A9E9C] hover:text-[#D47A7A]"
-            >
-              <IconTrash className="w-3 h-3" />
-              <span>清空紀錄</span>
-            </button>
           </div>
 
           <div className="space-y-2">
@@ -192,12 +187,19 @@ export const AskView: React.FC<AskViewProps> = ({
                   style={{ '--deal-idx': idx } as React.CSSProperties}
                   className="dj-card dj-deal-card overflow-hidden"
                 >
-                  <button
-                    type="button"
+                  <div
+                    role="button"
+                    tabIndex={0}
                     onClick={() => toggleExpand(item.id)}
-                    className="w-full text-left p-3.5 flex items-start justify-between gap-2 hover:bg-[rgba(255,255,255,0.03)] transition-colors"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        toggleExpand(item.id);
+                      }
+                    }}
+                    className="w-full text-left p-3.5 flex items-start justify-between gap-2 hover:bg-[rgba(255,255,255,0.03)] transition-colors cursor-pointer"
                   >
-                    <div className="min-w-0 space-y-1">
+                    <div className="min-w-0 space-y-1 flex-1">
                       <div className="text-[10px] dj-tnum text-[#6FA88B]">
                         [ Q{String(history.length - idx).padStart(2, '0')} ] · {item.createdAt.slice(0, 16).replace('T', ' ')}
                       </div>
@@ -205,10 +207,23 @@ export const AskView: React.FC<AskViewProps> = ({
                         {item.question}
                       </div>
                     </div>
-                    <span className="shrink-0 text-[10px] dj-tnum text-[#9A9E9C] pt-0.5">
-                      {isOpen ? '收合 ▲' : '展開 ▼'}
-                    </span>
-                  </button>
+                    <div className="shrink-0 flex items-center gap-2 pt-0.5">
+                      <span className="text-[10px] dj-tnum text-[#9A9E9C]">
+                        {isOpen ? '收合 ▲' : '展開 ▼'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setDeleteTarget(item);
+                        }}
+                        className="p-1 text-[#9A9E9C] hover:text-[#D47A7A] transition-colors"
+                        aria-label="刪除此問答紀錄"
+                      >
+                        <IconTrash className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
 
                   {isOpen && (
                     <div className="px-3.5 pb-3.5 pt-1 border-t border-[rgba(255,255,255,0.08)] space-y-3 dj-enter-right">
@@ -252,6 +267,45 @@ export const AskView: React.FC<AskViewProps> = ({
           </div>
         </div>
       )}
+
+      {deleteTarget &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) setDeleteTarget(null);
+            }}
+          >
+            <div className="dj-card w-full max-w-sm p-5 space-y-4">
+              <div className="text-xs tracking-[0.14em] text-[#D47A7A] uppercase">
+                確認刪除問答紀錄
+              </div>
+              <div className="text-xs text-[#E2E4E2] leading-relaxed">
+                確定要刪除這筆提問嗎？
+                <div className="mt-2 p-2 bg-[#0B0D0F] border border-[#252A2C] text-[#F4F4F0] line-clamp-2">
+                  {deleteTarget.question}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDeleteTarget(null)}
+                  className="dj-btn text-xs"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={handleConfirmDelete}
+                  className="dj-btn text-xs border-[#D47A7A]/70 text-[#D47A7A] hover:bg-[#D47A7A]/15"
+                >
+                  確認刪除
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
     </section>
   );
 };
