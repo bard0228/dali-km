@@ -58,6 +58,14 @@ export interface StructuredFactCheckItem {
   sources: Array<{ title: string; url: string }>;
 }
 
+export interface ExecutionStats {
+  provider: string;
+  model: string;
+  duration_ms: number;
+  total_tokens: number;
+  token_estimated?: boolean;
+}
+
 export interface StructuredPayload {
   schema_version?: number;
   one_line_summary?: string;
@@ -70,6 +78,14 @@ export interface StructuredPayload {
     summary?: string;
     items?: StructuredFactCheckItem[];
   };
+  execution_stats?: ExecutionStats;
+}
+
+export function formatDurationMs(ms: number): string {
+  const totalSec = Math.max(0, Math.round(ms / 1000));
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return `${String(min).padStart(2, '0')}分${String(sec).padStart(2, '0')}秒`;
 }
 
 export function extractStructuredJson(body: string): StructuredPayload | null {

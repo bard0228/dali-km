@@ -171,7 +171,7 @@ class MainActivity : AppCompatActivity() {
         fun isNativeApp(): Boolean = true
 
         @JavascriptInterface
-        fun getAppVersion(): String = "2.0.3"
+        fun getAppVersion(): String = "2.0.4"
 
         @JavascriptInterface
         fun syncSettings(settingsJson: String) {

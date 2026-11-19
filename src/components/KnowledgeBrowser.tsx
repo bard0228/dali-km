@@ -1,8 +1,16 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { getVaultAssetBlobUrl, getVaultFileText } from '../lib/githubApi';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { factCheckNoteWithGemini, injectFactCheckIntoNoteMarkdown } from '../lib/geminiWebApi';
+import {
+  deleteVaultNoteAndAssets,
+  getVaultAssetBlobUrl,
+  getVaultFileText,
+  putVaultFile,
+} from '../lib/githubApi';
 import {
   buildYouTubeTimestampUrl,
   extractStructuredJson,
+  formatDurationMs,
   formatNoteForLineShare,
   isImageAsset,
   parseNoteSections,
@@ -14,12 +22,15 @@ import {
 import { isGithubConfigured, type ByokSettings } from '../lib/storage';
 import {
   IconCheck,
+  IconClose,
   IconCopy,
   IconDownload,
   IconFrame,
   IconLink,
   IconNote,
+  IconSearch,
   IconText,
+  IconTrash,
   IconWarn,
 } from './LineIcons';
 
@@ -55,6 +66,171 @@ const TYPE_LABEL_MAP: Record<string, string> = {
   book: '電子書',
 };
 
+const DETAIL_TAB_ORDER = ['summary', 'keyframes', 'transcript', 'factcheck'] as const;
+type DetailTabId = (typeof DETAIL_TAB_ORDER)[number];
+
+function utf8ToBase64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+interface ZoomableLightboxProps {
+  url: string;
+  caption: string;
+  onClose: () => void;
+}
+
+const ZoomableLightbox: React.FC<ZoomableLightboxProps> = ({ url, caption, onClose }) => {
+  const [scale, setScale] = useState(1);
+  const [translate, setTranslate] = useState({ x: 0, y: 0 });
+  const pinchStartDistRef = useRef<number | null>(null);
+  const pinchStartScaleRef = useRef(1);
+  const panStartRef = useRef<{ x: number; y: number; tx: number; ty: number } | null>(null);
+  const lastTapRef = useRef<number>(0);
+
+  const clampScale = (s: number) => Math.min(4, Math.max(1, s));
+
+  const getTouchDistance = (t1: React.Touch, t2: React.Touch) => {
+    const dx = t1.clientX - t2.clientX;
+    const dy = t1.clientY - t2.clientY;
+    return Math.hypot(dx, dy);
+  };
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length === 2) {
+      pinchStartDistRef.current = getTouchDistance(e.touches[0], e.touches[1]);
+      pinchStartScaleRef.current = scale;
+      panStartRef.current = null;
+    } else if (e.touches.length === 1) {
+      const now = Date.now();
+      if (now - lastTapRef.current < 280) {
+        if (scale > 1.05) {
+          setScale(1);
+          setTranslate({ x: 0, y: 0 });
+        } else {
+          setScale(2.2);
+        }
+        lastTapRef.current = 0;
+        return;
+      }
+      lastTapRef.current = now;
+      if (scale > 1) {
+        panStartRef.current = {
+          x: e.touches[0].clientX,
+          y: e.touches[0].clientY,
+          tx: translate.x,
+          ty: translate.y,
+        };
+      }
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (e.touches.length === 2 && pinchStartDistRef.current) {
+      const dist = getTouchDistance(e.touches[0], e.touches[1]);
+      const next = clampScale(pinchStartScaleRef.current * (dist / pinchStartDistRef.current));
+      setScale(next);
+      if (next <= 1.02) {
+        setTranslate({ x: 0, y: 0 });
+      }
+    } else if (e.touches.length === 1 && panStartRef.current && scale > 1) {
+      const dx = e.touches[0].clientX - panStartRef.current.x;
+      const dy = e.touches[0].clientY - panStartRef.current.y;
+      setTranslate({
+        x: panStartRef.current.tx + dx,
+        y: panStartRef.current.ty + dy,
+      });
+    }
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (e.touches.length < 2) {
+      pinchStartDistRef.current = null;
+    }
+    if (e.touches.length === 0) {
+      panStartRef.current = null;
+      if (scale <= 1.02) {
+        setScale(1);
+        setTranslate({ x: 0, y: 0 });
+      }
+    }
+  };
+
+  const handleWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
+    const delta = e.deltaY < 0 ? 0.22 : -0.22;
+    const next = clampScale(scale + delta);
+    setScale(next);
+    if (next <= 1.02) setTranslate({ x: 0, y: 0 });
+  };
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 bg-black/95 flex flex-col select-none touch-none"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && scale <= 1.02) onClose();
+      }}
+      onWheel={handleWheel}
+    >
+      <div className="flex items-center justify-between gap-2 px-4 py-3 border-b border-[#252A2C] bg-[#0B0D0F]/90">
+        <div className="text-xs text-[#E2E4E2] truncate flex-1">{caption}</div>
+        <div className="flex items-center gap-2 shrink-0">
+          {scale > 1.02 && (
+            <button
+              type="button"
+              onClick={() => {
+                setScale(1);
+                setTranslate({ x: 0, y: 0 });
+              }}
+              className="px-2 py-1 text-[10px] border border-[#252A2C] text-[#6FA88B]"
+            >
+              {Math.round(scale * 100)}% 重置
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1.5 border border-[#252A2C] text-[#F4F4F0] hover:border-[#6FA88B]"
+            aria-label="關閉圖片預覽"
+          >
+            <IconClose className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      <div
+        className="flex-1 flex items-center justify-center overflow-hidden p-3"
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        onClick={(e) => {
+          if (e.target === e.currentTarget && scale <= 1.02) onClose();
+        }}
+      >
+        <img
+          src={url}
+          alt={caption}
+          draggable={false}
+          style={{
+            transform: `translate3d(${translate.x}px, ${translate.y}px, 0) scale(${scale})`,
+            transition: pinchStartDistRef.current || panStartRef.current ? 'none' : 'transform 140ms ease-out',
+          }}
+          className="max-w-full max-h-[82vh] object-contain border border-[#252A2C]"
+        />
+      </div>
+
+      <div className="px-4 py-2 text-center text-[10px] text-[#9A9E9C] bg-[#0B0D0F]/90 border-t border-[#252A2C]">
+        雙指縮放或雙擊放大 · 單指拖曳平移 · 點擊空白處或右上角關閉
+      </div>
+    </div>,
+    document.body
+  );
+};
+
 export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
   settings,
   selectedNoteId,
@@ -67,13 +243,17 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
+  const [typeFilterDir, setTypeFilterDir] = useState<'right' | 'left'>('right');
   const [tagFilter, setTagFilter] = useState('');
 
   const [activeNote, setActiveNote] = useState<SearchIndexEntry | null>(null);
-  const [detailTab, setDetailTab] = useState<'summary' | 'keyframes' | 'transcript' | 'factcheck'>('summary');
+  const [viewAnimDir, setViewAnimDir] = useState<'right' | 'left'>('right');
+  const [detailTab, setDetailTab] = useState<DetailTabId>('summary');
+  const [detailTabDir, setDetailTabDir] = useState<'right' | 'left'>('right');
   const [detailMode, setDetailMode] = useState<'detailed' | 'concise'>(
     settings.defaultDetailLevel || 'detailed'
   );
+  const [detailModeDir, setDetailModeDir] = useState<'right' | 'left'>('right');
   const [transcriptQuery, setTranscriptQuery] = useState('');
   const [copyToast, setCopyToast] = useState<string | null>(null);
 
@@ -83,7 +263,18 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
   const [assetUrls, setAssetUrls] = useState<{ path: string; url: string }[]>([]);
   const [lightboxUrl, setLightboxUrl] = useState<{ path: string; url: string } | null>(null);
 
+  const [deleteTarget, setDeleteTarget] = useState<SearchIndexEntry | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const [factChecking, setFactChecking] = useState(false);
+  const [factCheckError, setFactCheckError] = useState<string | null>(null);
+
   const configured = isGithubConfigured(settings);
+
+  const showToast = useCallback((msg: string) => {
+    setCopyToast(msg);
+    setTimeout(() => setCopyToast(null), 2400);
+  }, []);
 
   const fetchIndex = useCallback(async () => {
     if (!configured) return;
@@ -106,17 +297,22 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
 
   useEffect(() => {
     onRegisterBackHandler?.(() => {
+      if (deleteTarget && !deleting) {
+        setDeleteTarget(null);
+        return true;
+      }
       if (lightboxUrl) {
         setLightboxUrl(null);
         return true;
       }
       if (activeNote) {
+        setViewAnimDir('left');
         setActiveNote(null);
         return true;
       }
       return false;
     });
-  }, [onRegisterBackHandler, lightboxUrl, activeNote]);
+  }, [onRegisterBackHandler, lightboxUrl, activeNote, deleteTarget, deleting]);
 
   useEffect(() => {
     return () => {
@@ -126,8 +322,10 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
 
   const openNote = useCallback(
     async (entry: SearchIndexEntry) => {
+      setViewAnimDir('right');
       setActiveNote(entry);
       setDetailTab('summary');
+      setFactCheckError(null);
       setTranscriptQuery('');
       setNoteLoading(true);
       setNoteRawMd('');
@@ -219,11 +417,9 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
     );
     try {
       await navigator.clipboard.writeText(text);
-      setCopyToast('已複製 LINE 精華格式');
-      setTimeout(() => setCopyToast(null), 2000);
+      showToast('已複製 LINE 精華格式');
     } catch {
-      setCopyToast('複製失敗，請手動選取');
-      setTimeout(() => setCopyToast(null), 2000);
+      showToast('複製失敗，請手動選取');
     }
   };
 
@@ -236,6 +432,114 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
     a.download = `${activeNote.id}.md`;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget || deleting) return;
+    setDeleting(true);
+    try {
+      await deleteVaultNoteAndAssets(
+        settings,
+        deleteTarget.path,
+        deleteTarget.id,
+        deleteTarget.raw_assets,
+        indexData
+      );
+      setIndexData((prev) => {
+        if (!prev) return prev;
+        const nextNotes = prev.notes.filter((n) => n.id !== deleteTarget.id);
+        return { ...prev, total: nextNotes.length, notes: nextNotes };
+      });
+      if (activeNote?.id === deleteTarget.id) {
+        setViewAnimDir('left');
+        setActiveNote(null);
+      }
+      setDeleteTarget(null);
+      showToast('已刪除分析紀錄與關聯圖片');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '刪除筆記失敗');
+      setDeleteTarget(null);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const handleRunFactCheck = async () => {
+    if (!activeNote || factChecking) return;
+    setFactChecking(true);
+    setFactCheckError(null);
+    try {
+      const kps =
+        structured?.key_points && structured.key_points.length > 0
+          ? structured.key_points
+          : parsedSections.summaryBullets.map((b) => ({
+              section: '重點',
+              point: b,
+              detail: '',
+              timestamp: '',
+            }));
+      const fcResult = await factCheckNoteWithGemini(
+        settings.geminiApiKey,
+        settings.geminiModel || 'gemini-3.8-flash',
+        activeNote.title,
+        kps
+      );
+      const updatedMd = injectFactCheckIntoNoteMarkdown(noteRawMd, fcResult);
+      await putVaultFile(
+        settings,
+        activeNote.path,
+        utf8ToBase64(updatedMd),
+        `feat(factcheck): ${activeNote.id}`
+      );
+      setNoteRawMd(updatedMd);
+      setNoteBody(stripFrontmatter(updatedMd));
+
+      if (indexData) {
+        const nextNotes = indexData.notes.map((n) =>
+          n.id === activeNote.id
+            ? { ...n, has_fact_check: fcResult.items.length > 0 }
+            : n
+        );
+        const updatedIndex = { ...indexData, notes: nextNotes };
+        await putVaultFile(
+          settings,
+          'index/search-index.json',
+          utf8ToBase64(JSON.stringify(updatedIndex, null, 2) + '\n'),
+          `chore(index): mark fact_check for ${activeNote.id}`
+        );
+        setIndexData(updatedIndex);
+        setActiveNote((prev) =>
+          prev ? { ...prev, has_fact_check: fcResult.items.length > 0 } : prev
+        );
+      }
+      showToast('Google Search 事實查核完成並已寫入知識庫');
+    } catch (err) {
+      setFactCheckError(err instanceof Error ? err.message : '事實查核失敗');
+    } finally {
+      setFactChecking(false);
+    }
+  };
+
+  const handleSwitchDetailTab = (next: DetailTabId) => {
+    if (next === detailTab) return;
+    const prevIdx = DETAIL_TAB_ORDER.indexOf(detailTab);
+    const nextIdx = DETAIL_TAB_ORDER.indexOf(next);
+    setDetailTabDir(nextIdx >= prevIdx ? 'right' : 'left');
+    setDetailTab(next);
+  };
+
+  const handleSwitchDetailMode = (next: 'detailed' | 'concise') => {
+    if (next === detailMode) return;
+    setDetailModeDir(next === 'concise' ? 'right' : 'left');
+    setDetailMode(next);
+  };
+
+  const handleSwitchTypeFilter = (next: string) => {
+    if (next === typeFilter) return;
+    const prevIdx = TYPE_FILTERS.indexOf(typeFilter);
+    const nextIdx = TYPE_FILTERS.indexOf(next);
+    setTypeFilterDir(nextIdx >= prevIdx ? 'right' : 'left');
+    setTypeFilter(next);
   };
 
   if (!configured) {
@@ -277,11 +581,25 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
       : transcriptRows;
     const factItems = structured?.fact_check?.items || [];
 
+    const stats = structured?.execution_stats;
+    const providerLabel =
+      stats?.provider === 'openrouter'
+        ? 'OpenRouter'
+        : stats?.provider === 'gemini'
+        ? 'Gemini'
+        : stats?.provider || 'AI';
+
     return (
-      <section className="space-y-4">
+      <section
+        key={`detail-${activeNote.id}`}
+        className={`space-y-4 ${viewAnimDir === 'right' ? 'dj-enter-right' : 'dj-enter-left'}`}
+      >
         <div className="flex items-center justify-between gap-2">
           <button
-            onClick={() => setActiveNote(null)}
+            onClick={() => {
+              setViewAnimDir('left');
+              setActiveNote(null);
+            }}
             className="text-xs tracking-[0.14em] text-[#9A9E9C] hover:text-[#F4F4F0] uppercase"
           >
             ← 返回知識列表
@@ -303,6 +621,14 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
               <IconDownload className="w-3 h-3" />
               <span>.md</span>
             </button>
+            <button
+              type="button"
+              onClick={() => setDeleteTarget(activeNote)}
+              className="flex items-center gap-1 text-[11px] px-2 py-1 border border-[#252A2C] text-[#D47A7A] hover:border-[#D47A7A]"
+              aria-label="刪除此分析紀錄"
+            >
+              <IconTrash className="w-3 h-3" />
+            </button>
           </div>
         </div>
 
@@ -312,7 +638,10 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
           </div>
         )}
 
-        <div className="dj-card p-4 space-y-3">
+        <div
+          className="dj-card dj-deal-card p-4 space-y-3"
+          style={{ '--deal-idx': 0 } as React.CSSProperties}
+        >
           <div className="flex flex-wrap items-center gap-2 text-[11px] text-[#9A9E9C]">
             <span className="px-2 py-0.5 border border-[#252A2C] uppercase">
               {TYPE_LABEL_MAP[activeNote.source_type] || activeNote.source_type}
@@ -331,6 +660,16 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
             <div className="flex items-start gap-2 p-2.5 bg-[#6FA88B]/10 border-l-2 border-l-[#6FA88B] text-xs text-[#E8ECEA] leading-relaxed">
               <IconNote className="w-3.5 h-3.5 text-[#6FA88B] shrink-0 mt-0.5" />
               <span>{structured.one_line_summary}</span>
+            </div>
+          )}
+
+          {stats && (
+            <div className="px-2.5 py-2 bg-[#0B0D0F] border border-[#252A2C] text-[11px] text-[#9A9E9C] dj-tnum leading-relaxed">
+              本次分析由 <span className="text-[#F4F4F0]">{providerLabel}</span> API 執行，模型為{' '}
+              <span className="text-[#6FA88B]">{stats.model}</span>，耗時{' '}
+              <span className="text-[#F4F4F0]">{formatDurationMs(stats.duration_ms)}</span>，
+              {stats.token_estimated ? '預估' : ''}消耗{' '}
+              <span className="text-[#F4F4F0]">{stats.total_tokens.toLocaleString()}</span> tokens
             </div>
           )}
 
@@ -380,7 +719,7 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
               <button
                 key={t.id}
                 type="button"
-                onClick={() => setDetailTab(t.id)}
+                onClick={() => handleSwitchDetailTab(t.id)}
                 className={`py-2 text-center border-b-2 transition-colors truncate px-1 ${
                   detailTab === t.id
                     ? 'border-[#6FA88B] text-[#F4F4F0]'
@@ -394,52 +733,67 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
 
           {noteLoading ? (
             <div className="text-xs text-[#9A9E9C] py-6 text-center">載入筆記中...</div>
-          ) : detailTab === 'summary' ? (
-            <div className="space-y-4">
-              {structured?.key_points && structured.key_points.length > 0 ? (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div className="text-[10px] tracking-[0.14em] text-[#9A9E9C] uppercase">
-                      AI 結構化重點（共 {structured.key_points.length} 條）
-                    </div>
-                    <div className="flex border border-[#252A2C] text-[10px]">
-                      <button
-                        type="button"
-                        onClick={() => setDetailMode('detailed')}
-                        className={`px-2 py-0.5 ${
-                          detailMode === 'detailed'
-                            ? 'bg-[#6FA88B]/20 text-[#F4F4F0]'
-                            : 'text-[#9A9E9C]'
-                        }`}
-                      >
-                        詳細
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setDetailMode('concise')}
-                        className={`px-2 py-0.5 ${
-                          detailMode === 'concise'
-                            ? 'bg-[#6FA88B]/20 text-[#F4F4F0]'
-                            : 'text-[#9A9E9C]'
-                        }`}
-                      >
-                        精簡
-                      </button>
-                    </div>
-                  </div>
-
-                  {groupedKeyPoints.map((grp, gIdx) => (
-                    <div key={gIdx} className="space-y-1.5">
-                      <div className="text-[11px] font-medium text-[#6FA88B] tracking-wide border-b border-[#252A2C] pb-1">
-                        {grp.section}
+          ) : (
+            <div
+              key={detailTab}
+              className={detailTabDir === 'right' ? 'dj-enter-right' : 'dj-enter-left'}
+            >
+              {detailTab === 'summary' ? (
+                <div className="space-y-4">
+                  {structured?.key_points && structured.key_points.length > 0 ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="text-[10px] tracking-[0.14em] text-[#9A9E9C] uppercase">
+                          AI 結構化重點（共 {structured.key_points.length} 條）
+                        </div>
+                        <div className="flex border border-[#252A2C] text-[10px]">
+                          <button
+                            type="button"
+                            onClick={() => handleSwitchDetailMode('detailed')}
+                            className={`px-2 py-0.5 transition-colors ${
+                              detailMode === 'detailed'
+                                ? 'bg-[#6FA88B]/20 text-[#F4F4F0]'
+                                : 'text-[#9A9E9C]'
+                            }`}
+                          >
+                            詳細
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSwitchDetailMode('concise')}
+                            className={`px-2 py-0.5 transition-colors ${
+                              detailMode === 'concise'
+                                ? 'bg-[#6FA88B]/20 text-[#F4F4F0]'
+                                : 'text-[#9A9E9C]'
+                            }`}
+                          >
+                            精簡
+                          </button>
+                        </div>
                       </div>
-                      <ul className="space-y-2">
-                        {grp.items.map((kp, idx) => {
-                          const jumpUrl = kp.timestamp
-                            ? buildYouTubeTimestampUrl(activeNote.source_url, kp.timestamp)
-                            : null;
-                          return (
-                            <li key={idx} className="p-2.5 bg-[#0B0D0F] border border-[#1E2224] space-y-1">
+
+                      <div
+                        key={detailMode}
+                        className={`space-y-3 ${
+                          detailModeDir === 'right' ? 'dj-enter-right' : 'dj-enter-left'
+                        }`}
+                      >
+                        {groupedKeyPoints.map((grp, gIdx) => (
+                          <div
+                            key={gIdx}
+                            className="space-y-1.5 dj-deal-card"
+                            style={{ '--deal-idx': gIdx + 1 } as React.CSSProperties}
+                          >
+                            <div className="text-[11px] font-medium text-[#6FA88B] tracking-wide border-b border-[#252A2C] pb-1">
+                              {grp.section}
+                            </div>
+                            <ul className="space-y-2">
+                              {grp.items.map((kp, idx) => {
+                                const jumpUrl = kp.timestamp
+                                  ? buildYouTubeTimestampUrl(activeNote.source_url, kp.timestamp)
+                                  : null;
+                                return (
+                                  <li key={idx} className="p-2.5 bg-[#0B0D0F] border border-[#1E2224] space-y-1">
                               <div className="flex items-start gap-2">
                                 {kp.timestamp &&
                                   (jumpUrl ? (
@@ -471,9 +825,13 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
                       </ul>
                     </div>
                   ))}
+                  </div>
 
                   {structured.key_info && structured.key_info.length > 0 && (
-                    <div className="space-y-1.5 pt-1">
+                    <div
+                      className="space-y-1.5 pt-1 dj-deal-card"
+                      style={{ '--deal-idx': groupedKeyPoints.length + 1 } as React.CSSProperties}
+                    >
                       <div className="text-[10px] tracking-[0.14em] text-[#9A9E9C] uppercase">
                         關鍵資訊與數據
                       </div>
@@ -572,18 +930,19 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
                     return (
                       <div
                         key={idx}
-                        className="border border-[#252A2C] bg-[#0B0D0F] overflow-hidden"
+                        className="border border-[#252A2C] bg-[#0B0D0F] overflow-hidden dj-deal-card"
+                        style={{ '--deal-idx': idx } as React.CSSProperties}
                       >
                         {blobUrl ? (
                           <button
                             type="button"
                             onClick={() => setLightboxUrl({ path: repoPath, url: blobUrl })}
-                            className="w-full text-left"
+                            className="w-full text-left dj-curtain-wrap block h-44"
                           >
                             <img
                               src={blobUrl}
                               alt={kf.caption || kf.timestamp}
-                              className="w-full h-44 object-cover"
+                              className="dj-curtain-media is-revealed w-full h-44 object-cover"
                             />
                           </button>
                         ) : (
@@ -605,18 +964,21 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
                 </div>
               ) : assetUrls.length > 0 ? (
                 <div className="grid grid-cols-2 gap-2">
-                  {assetUrls.map((a) => (
+                  {assetUrls.map((a, idx) => (
                     <button
                       key={a.path}
                       type="button"
                       onClick={() => setLightboxUrl(a)}
-                      className="text-left border border-[#252A2C] bg-[#0B0D0F] overflow-hidden hover:border-[#6FA88B]"
+                      className="text-left border border-[#252A2C] bg-[#0B0D0F] overflow-hidden hover:border-[#6FA88B] dj-deal-card"
+                      style={{ '--deal-idx': idx } as React.CSSProperties}
                     >
-                      <img
-                        src={a.url}
-                        alt={parsedSections.imageCaptions[a.path] || a.path}
-                        className="w-full h-28 object-cover"
-                      />
+                      <div className="dj-curtain-wrap h-28 w-full">
+                        <img
+                          src={a.url}
+                          alt={parsedSections.imageCaptions[a.path] || a.path}
+                          className="dj-curtain-media is-revealed w-full h-28 object-cover"
+                        />
+                      </div>
                       <div className="p-1.5 text-[10px] text-[#9A9E9C] truncate">
                         {parsedSections.imageCaptions[a.path] || a.path.split('/').pop()}
                       </div>
@@ -714,33 +1076,122 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
                   })}
                 </div>
               ) : (
-                <div className="text-xs text-[#9A9E9C] py-6 text-center">
-                  此筆記尚未進行 Google Search 事實查核（需設定 Gemini API Key）。
+                <div className="space-y-3 py-2">
+                  <div className="text-xs text-[#9A9E9C] text-center">
+                    此筆記尚未進行 Google Search 事實查核。
+                  </div>
+                  {factCheckError && (
+                    <div className="p-2.5 bg-[#0B0D0F] border-l-2 border-l-[#D47A7A] text-xs text-[#D47A7A]">
+                      {factCheckError}
+                    </div>
+                  )}
+                  <div className="flex flex-col items-center gap-2">
+                    {settings.geminiApiKey?.trim() ? (
+                      <button
+                        type="button"
+                        onClick={handleRunFactCheck}
+                        disabled={factChecking}
+                        className="dj-btn dj-btn-primary text-xs px-4"
+                      >
+                        <IconSearch className="w-3.5 h-3.5" />
+                        <span>{factChecking ? 'Google Search 查核中...' : '立即執行 Google Search 事實查核'}</span>
+                      </button>
+                    ) : (
+                      <>
+                        <div className="text-[11px] text-[#6E7371]">
+                          需先於「04 設定」填入 Gemini API Key 才能啟用即時網路查核
+                        </div>
+                        <button
+                          type="button"
+                          onClick={onGoSettings}
+                          className="dj-btn text-xs px-4"
+                        >
+                          前往 04 設定
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
               )}
+              {factItems.length > 0 && (
+                <div className="pt-2 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={handleRunFactCheck}
+                    disabled={factChecking || !settings.geminiApiKey?.trim()}
+                    className="dj-btn text-[11px] px-3 min-h-[36px]"
+                  >
+                    <IconSearch className="w-3 h-3" />
+                    <span>{factChecking ? '重新查核中...' : '重新執行事實查核'}</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
             </div>
           )}
         </div>
 
         {lightboxUrl && (
-          <div
-            onClick={() => setLightboxUrl(null)}
-            className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center p-4"
-          >
-            <img
-              src={lightboxUrl.url}
-              alt={lightboxUrl.path}
-              className="max-w-full max-h-[82vh] object-contain border border-[#252A2C]"
-            />
-            <p className="mt-2 text-[11px] text-[#9A9E9C]">點擊任意處關閉預覽</p>
-          </div>
+          <ZoomableLightbox
+            url={lightboxUrl.url}
+            caption={lightboxUrl.path}
+            onClose={() => setLightboxUrl(null)}
+          />
         )}
+
+        {deleteTarget &&
+          createPortal(
+            <div
+              className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+              onClick={(e) => {
+                if (e.target === e.currentTarget && !deleting) setDeleteTarget(null);
+              }}
+            >
+              <div className="dj-card w-full max-w-sm p-5 space-y-4">
+                <div className="text-xs tracking-[0.14em] text-[#D47A7A] uppercase">
+                  確認刪除分析紀錄
+                </div>
+                <div className="text-xs text-[#E2E4E2] leading-relaxed">
+                  確定要永久刪除「<span className="text-[#F4F4F0] font-medium">{deleteTarget.title}</span>」嗎？此操作會同步移除 Vault 筆記與關聯截圖，無法復原。
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    disabled={deleting}
+                    onClick={() => setDeleteTarget(null)}
+                    className="dj-btn text-xs"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    disabled={deleting}
+                    onClick={handleConfirmDelete}
+                    className="dj-btn text-xs border-[#D47A7A]/70 text-[#D47A7A] hover:bg-[#D47A7A]/15"
+                  >
+                    {deleting ? '刪除中...' : '確認刪除'}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body
+          )}
       </section>
     );
   }
 
   return (
-    <section className="space-y-4">
+    <section
+      key="list-view"
+      className={`space-y-4 ${viewAnimDir === 'left' ? 'dj-enter-left' : 'dj-enter-right'}`}
+    >
+      {copyToast && (
+        <div className="dj-card p-2 text-center text-xs text-[#6FA88B] border-l-2 border-l-[#6FA88B]">
+          {copyToast}
+        </div>
+      )}
+
       <div className="flex gap-2">
         <input
           type="text"
@@ -763,7 +1214,7 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
           <button
             key={tp}
             type="button"
-            onClick={() => setTypeFilter(tp)}
+            onClick={() => handleSwitchTypeFilter(tp)}
             className={`px-2.5 py-1 text-[11px] border shrink-0 transition-colors ${
               typeFilter === tp
                 ? 'border-[#6FA88B] bg-[#6FA88B]/15 text-[#F4F4F0]'
@@ -814,19 +1265,45 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
           目前沒有符合條件的知識筆記。
         </div>
       ) : (
-        <div className="space-y-2.5">
-          {filteredNotes.map((n) => (
-            <button
+        <div
+          key={`${typeFilter}-${tagFilter}`}
+          className={`space-y-2.5 ${
+            typeFilterDir === 'right' ? 'dj-enter-right' : 'dj-enter-left'
+          }`}
+        >
+          {filteredNotes.map((n, idx) => (
+            <div
               key={n.id}
-              type="button"
               onClick={() => openNote(n)}
-              className="dj-card w-full text-left p-3.5 hover:border-[#6FA88B] transition-colors space-y-1.5"
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  openNote(n);
+                }
+              }}
+              className="dj-card dj-deal-card w-full text-left p-3.5 hover:border-[#6FA88B] transition-colors space-y-1.5 cursor-pointer"
+              style={{ '--deal-idx': idx } as React.CSSProperties}
             >
               <div className="flex items-center justify-between gap-2 text-[10px] text-[#9A9E9C]">
                 <span className="uppercase tracking-wider">
                   {TYPE_LABEL_MAP[n.source_type] || n.source_type} · {n.category}
                 </span>
-                <span>{n.created_at.slice(0, 10)}</span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span>{n.created_at.slice(0, 10)}</span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDeleteTarget(n);
+                    }}
+                    className="p-1 text-[#9A9E9C] hover:text-[#D47A7A] transition-colors"
+                    aria-label={`刪除 ${n.title}`}
+                  >
+                    <IconTrash className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
               <div className="text-sm font-medium text-[#F4F4F0] leading-snug">
                 {n.title}
@@ -859,10 +1336,48 @@ export const KnowledgeBrowser: React.FC<KnowledgeBrowserProps> = ({
                   )}
                 </div>
               )}
-            </button>
+            </div>
           ))}
         </div>
       )}
+
+      {deleteTarget &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+            onClick={(e) => {
+              if (e.target === e.currentTarget && !deleting) setDeleteTarget(null);
+            }}
+          >
+            <div className="dj-card w-full max-w-sm p-5 space-y-4">
+              <div className="text-xs tracking-[0.14em] text-[#D47A7A] uppercase">
+                確認刪除分析紀錄
+              </div>
+              <div className="text-xs text-[#E2E4E2] leading-relaxed">
+                確定要永久刪除「<span className="text-[#F4F4F0] font-medium">{deleteTarget.title}</span>」嗎？此操作會同步移除 Vault 筆記與關聯截圖，無法復原。
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  disabled={deleting}
+                  onClick={() => setDeleteTarget(null)}
+                  className="dj-btn text-xs"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  disabled={deleting}
+                  onClick={handleConfirmDelete}
+                  className="dj-btn text-xs border-[#D47A7A]/70 text-[#D47A7A] hover:bg-[#D47A7A]/15"
+                >
+                  {deleting ? '刪除中...' : '確認刪除'}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
     </section>
   );
 };

@@ -65,3 +65,24 @@ export const IconWarn: React.FC<IconProps> = ({ className = 'w-3.5 h-3.5' }) => 
     <path d="M12 10v4M12 17v.5" />
   </svg>
 );
+
+export const IconTrash: React.FC<IconProps> = ({ className = 'w-3.5 h-3.5' }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}>
+    <path d="M4 7h16" />
+    <path d="M9 7V4h6v3" />
+    <path d="M6 7l1 13h10l1-13" />
+  </svg>
+);
+
+export const IconSearch: React.FC<IconProps> = ({ className = 'w-3.5 h-3.5' }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}>
+    <circle cx="11" cy="11" r="7" />
+    <path d="M20 20l-4-4" />
+  </svg>
+);
+
+export const IconClose: React.FC<IconProps> = ({ className = 'w-4 h-4' }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}>
+    <path d="M6 6l12 12M18 6L6 18" />
+  </svg>
+);

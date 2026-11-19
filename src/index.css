@@ -247,6 +247,24 @@ body {
   }
 }
 
+/* 卡片發牌式由下往上依序排入（每張 45ms，上限第 8 張） */
+.dj-deal-card {
+  opacity: 0;
+  animation: djDealCard 0.36s var(--dj-ease-expo) forwards;
+  animation-delay: calc(min(var(--deal-idx, 0), 8) * 45ms);
+}
+
+@keyframes djDealCard {
+  0% {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .safe-top {
   padding-top: max(14px, env(safe-area-inset-top));
 }

@@ -7,14 +7,11 @@ import {
 } from '../lib/githubApi';
 import { isNativeApkEnv, type NativeProgressEvent } from '../lib/nativeBridge';
 import {
-  GEMINI_MODEL_OPTIONS,
   isGithubConfigured,
   nowTaipeiIso,
   nowTaipeiStamp,
-  type AiProvider,
   type ByokSettings,
 } from '../lib/storage';
-import { IconPhone } from './LineIcons';
 
 type SourceKind =
   | 'screenshot'
@@ -101,13 +98,9 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
   const [detailLevel, setDetailLevel] = useState<'detailed' | 'concise'>(
     settings.defaultDetailLevel || 'detailed'
   );
-  const [aiProvider, setAiProvider] = useState<AiProvider>(settings.aiProvider || 'gemini');
-  const [geminiModel, setGeminiModel] = useState<string>(
-    settings.geminiModel || 'gemini-3.8-flash'
-  );
   const [files, setFiles] = useState<File[]>([]);
-  const [useNativeHarvester, setUseNativeHarvester] = useState<boolean>(isNativeApkEnv());
   const [nativeProgress, setNativeProgress] = useState<NativeProgressEvent | null>(null);
+  const [nativeFailedUrl, setNativeFailedUrl] = useState<string | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [batchLogs, setBatchLogs] = useState<string[]>([]);
@@ -115,6 +108,7 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const activeNativeRef = useRef(false);
+  const activeNativeUrlRef = useRef<string>('');
 
   // Follow channel state
   const [channels, setChannels] = useState<FollowedChannel[]>([]);
@@ -125,29 +119,32 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
   const configured = isGithubConfigured(settings);
   const isNative = isNativeApkEnv();
 
-  // Keep local defaults aligned with 04 設定 when not actively running a job
+  // Keep local detailLevel default aligned with 04 設定 when not actively running a job
   useEffect(() => {
     if (submitting) return;
-    setAiProvider(settings.aiProvider || 'gemini');
-    setGeminiModel(settings.geminiModel || 'gemini-3.8-flash');
     setDetailLevel(settings.defaultDetailLevel || 'detailed');
-  }, [settings.aiProvider, settings.geminiModel, settings.defaultDetailLevel, submitting]);
+  }, [settings.defaultDetailLevel, submitting]);
 
   // Receive Android ACTION_SEND shared URL or progress callbacks
   useEffect(() => {
     window.onDaliNativeProgress = (ev) => {
       if (ev.stage === 'done') {
         activeNativeRef.current = false;
+        activeNativeUrlRef.current = '';
+        setNativeFailedUrl(null);
         setNativeProgress(null);
         setSubmitting(false);
         setResult({ ok: true, text: ev.message || '手機端解析與知識庫同步完成！' });
       } else if (ev.stage === 'cancelled') {
         activeNativeRef.current = false;
+        activeNativeUrlRef.current = '';
+        setNativeFailedUrl(null);
         setNativeProgress(null);
         setSubmitting(false);
         setResult({ ok: false, text: ev.message || '已手動停止分析。' });
       } else if (ev.stage === 'error') {
         activeNativeRef.current = false;
+        setNativeFailedUrl(activeNativeUrlRef.current || null);
         setNativeProgress(null);
         setSubmitting(false);
         setResult({ ok: false, text: ev.message || '手機端解析失敗' });
@@ -265,6 +262,73 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
     setResult({ ok: false, text: '已手動停止分析。' });
   };
 
+  const handlePasteUrl = async () => {
+    try {
+      const clip = await navigator.clipboard.readText();
+      const trimmed = clip.trim();
+      if (trimmed) {
+        setSourceUrl(trimmed);
+        setNativeFailedUrl(null);
+      } else {
+        setResult({ ok: false, text: '剪貼簿目前沒有文字內容。' });
+      }
+    } catch {
+      setResult({ ok: false, text: '無法自動讀取剪貼簿，請長按輸入框手動貼上。' });
+    }
+  };
+
+  const handleFallbackToCloud = async () => {
+    const urlToQueue = (nativeFailedUrl || sourceUrl).trim();
+    if (!urlToQueue || submitting) return;
+    const tags = tagsText
+      .split(/[,，]/)
+      .map((t) => t.trim())
+      .filter(Boolean);
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    setSubmitting(true);
+    setResult(null);
+    setNativeFailedUrl(null);
+    try {
+      const stamp = nowTaipeiStamp();
+      const taskJson: Record<string, unknown> = {
+        source_type: sourceType,
+        source_url: urlToQueue,
+        title: title.trim() || undefined,
+        tags,
+        user_summary: userSummary.trim(),
+        detail_level: detailLevel,
+        ai_provider: settings.aiProvider || 'gemini',
+        gemini_model: settings.geminiModel || 'gemini-3.8-flash',
+        created_at: nowTaipeiIso(),
+      };
+      const taskPath = `inbox/pending/${stamp}_${sourceType}.json`;
+      await putVaultFile(
+        settings,
+        taskPath,
+        stringToBase64(JSON.stringify(taskJson, null, 2)),
+        `inbox(${sourceType}): cloud fallback ${stamp}`,
+        controller.signal
+      );
+      await triggerIngestWorkflow(settings, `${sourceType}:${urlToQueue}`, controller.signal);
+      setSourceUrl('');
+      setTitle('');
+      setTagsText('');
+      setUserSummary('');
+      setResult({
+        ok: true,
+        text: `已改由雲端寫入 ${taskPath} 並觸發 GitHub Actions 解析管線（約 1~2 分鐘後至「02 檢索」查看）。`,
+      });
+    } catch (err) {
+      setResult({ ok: false, text: err instanceof Error ? err.message : '雲端改派失敗' });
+    } finally {
+      if (abortControllerRef.current === controller) {
+        abortControllerRef.current = null;
+      }
+      setSubmitting(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!configured) {
@@ -277,15 +341,19 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
       .split(/[,，]/)
       .map((t) => t.trim())
       .filter(Boolean);
+    const activeProvider = settings.aiProvider || 'gemini';
+    const activeGeminiModel = settings.geminiModel || 'gemini-3.8-flash';
 
-    // 1. Native Android Edge Harvester path for video links
+    // 1. Native Android Edge Harvester path for video links (always on in APK)
     if (
       isNative &&
-      useNativeHarvester &&
       (sourceType === 'youtube' || sourceType === 'ig_video') &&
       sourceUrl.trim()
     ) {
+      const targetUrl = sourceUrl.trim();
       activeNativeRef.current = true;
+      activeNativeUrlRef.current = targetUrl;
+      setNativeFailedUrl(null);
       setSubmitting(true);
       setResult(null);
       setNativeProgress({ stage: 'fetching', message: '正在喚起手機端原生擷取引擎...' });
@@ -297,13 +365,13 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
       window.DaliNativeBridge?.processUrlInEdgeHarvester?.(
         JSON.stringify({
           source_type: sourceType,
-          source_url: sourceUrl.trim(),
+          source_url: targetUrl,
           title: title.trim(),
           tags,
           user_summary: userSummary.trim(),
           detail_level: detailLevel,
-          ai_provider: aiProvider,
-          gemini_model: geminiModel,
+          ai_provider: activeProvider,
+          gemini_model: activeGeminiModel,
         })
       );
       return;
@@ -333,8 +401,8 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
             tags,
             user_summary: userSummary.trim(),
             detail_level: detailLevel,
-            ai_provider: aiProvider,
-            gemini_model: geminiModel,
+            ai_provider: activeProvider,
+            gemini_model: activeGeminiModel,
             created_at: nowTaipeiIso(),
           };
           await putVaultFile(
@@ -470,8 +538,8 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
           tags,
           user_summary: userSummary.trim(),
           detail_level: detailLevel,
-          ai_provider: aiProvider,
-          gemini_model: geminiModel,
+          ai_provider: activeProvider,
+          gemini_model: activeGeminiModel,
           asset_filename: assetFilename || undefined,
           created_at: nowTaipeiIso(),
         };
@@ -636,74 +704,6 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
         </div>
       ) : (
         <form onSubmit={handleSubmit} className="space-y-4">
-          {isNative && (sourceType === 'youtube' || sourceType === 'ig_video') && (
-            <label className="dj-card p-3 flex items-center justify-between gap-2 text-xs cursor-pointer">
-              <div className="space-y-0.5">
-                <div className="flex items-center gap-1.5 text-[#F4F4F0] font-medium">
-                  <IconPhone className="w-3.5 h-3.5 text-[#6FA88B] shrink-0" />
-                  <span>手機端原生擷取（防封鎖＋即時截圖）</span>
-                </div>
-                <div className="text-[10px] text-[#9A9E9C]">
-                  使用手機行動網路直接抓片與字幕，繞過雲端機房封鎖
-                </div>
-              </div>
-              <input
-                type="checkbox"
-                checked={useNativeHarvester}
-                onChange={(e) => setUseNativeHarvester(e.target.checked)}
-                className="accent-[#6FA88B] w-4 h-4"
-              />
-            </label>
-          )}
-
-          {/* 分析引擎與模型選擇 */}
-          <div className="dj-card p-3 space-y-2">
-            <div className="text-[10px] tracking-[0.14em] text-[#9A9E9C] uppercase">
-              分析引擎與模型
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => setAiProvider('gemini')}
-                className={`py-1.5 px-2 border text-[11px] transition-colors ${
-                  aiProvider === 'gemini'
-                    ? 'border-[#6FA88B] bg-[#6FA88B]/15 text-[#F4F4F0]'
-                    : 'border-[#252A2C] bg-[#0B0D0F] text-[#9A9E9C]'
-                }`}
-              >
-                Gemini API
-              </button>
-              <button
-                type="button"
-                onClick={() => setAiProvider('openrouter')}
-                className={`py-1.5 px-2 border text-[11px] transition-colors ${
-                  aiProvider === 'openrouter'
-                    ? 'border-[#6FA88B] bg-[#6FA88B]/15 text-[#F4F4F0]'
-                    : 'border-[#252A2C] bg-[#0B0D0F] text-[#9A9E9C]'
-                }`}
-              >
-                OpenRouter (openrouter/free)
-              </button>
-            </div>
-            {aiProvider === 'gemini' ? (
-              <select
-                value={geminiModel}
-                onChange={(e) => setGeminiModel(e.target.value)}
-                className="dj-input text-xs"
-              >
-                {GEMINI_MODEL_OPTIONS.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <div className="text-[10px] text-[#9A9E9C]">
-                將使用 OpenRouter 免費路由模型：<span className="text-[#6FA88B]">openrouter/free</span>
-              </div>
-            )}
-          </div>
-
           {sourceType === 'batch' ? (
             <div>
               <label className="block text-[11px] tracking-[0.14em] text-[#9A9E9C] uppercase mb-1.5">
@@ -738,13 +738,25 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
               <label className="block text-[11px] tracking-[0.14em] text-[#9A9E9C] uppercase mb-1.5">
                 來源網址
               </label>
-              <input
-                type="url"
-                value={sourceUrl}
-                onChange={(e) => setSourceUrl(e.target.value)}
-                placeholder="https://..."
-                className="dj-input"
-              />
+              <div className="flex gap-2">
+                <input
+                  type="url"
+                  value={sourceUrl}
+                  onChange={(e) => {
+                    setSourceUrl(e.target.value);
+                    if (nativeFailedUrl) setNativeFailedUrl(null);
+                  }}
+                  placeholder="https://..."
+                  className="dj-input flex-1"
+                />
+                <button
+                  type="button"
+                  onClick={handlePasteUrl}
+                  className="dj-btn px-3 text-xs shrink-0"
+                >
+                  貼上
+                </button>
+              </div>
             </div>
           ) : null}
 
@@ -843,11 +855,20 @@ export const QuickInbox: React.FC<QuickInboxProps> = ({ settings, onGoSettings }
 
           {result && (
             <div
-              className={`dj-card p-3 text-xs leading-relaxed ${
+              className={`dj-card p-3 text-xs leading-relaxed space-y-2 ${
                 result.ok ? 'border-l-2 border-l-[#6FA88B]' : 'border-l-2 border-l-[#D47A7A]'
               }`}
             >
-              {result.text}
+              <div>{result.text}</div>
+              {!result.ok && nativeFailedUrl && (
+                <button
+                  type="button"
+                  onClick={handleFallbackToCloud}
+                  className="dj-btn text-[11px] px-3 py-1.5 min-h-[36px] border-[#6FA88B]/60 text-[#6FA88B]"
+                >
+                  改由雲端嘗試
+                </button>
+              )}
             </div>
           )}
 

@@ -230,3 +230,80 @@ export async function getVaultAssetBlobUrl(
       : 'image/png';
   return URL.createObjectURL(new Blob([bytes], { type: mime }));
 }
+
+export async function deleteVaultFile(
+  settings: ByokSettings,
+  repoPath: string,
+  commitMessage: string
+): Promise<void> {
+  const owner = settings.githubOwner.trim();
+  const repo = settings.githubRepo.trim();
+  const branch = settings.githubBranch.trim() || 'main';
+  const cleanPath = repoPath.replace(/^\/+/, '');
+  const url = `${GH_API_BASE}/repos/${owner}/${repo}/contents/${cleanPath}`;
+
+  const checkRes = await fetch(`${url}?ref=${encodeURIComponent(branch)}`, {
+    headers: ghHeaders(settings.githubPat),
+  });
+  if (checkRes.status === 404) return;
+  if (!checkRes.ok) {
+    throw new Error(`查詢 ${cleanPath} SHA 失敗 (HTTP ${checkRes.status})`);
+  }
+  const existing = (await checkRes.json()) as { sha?: string };
+  if (!existing.sha) return;
+
+  const res = await fetch(url, {
+    method: 'DELETE',
+    headers: {
+      ...ghHeaders(settings.githubPat),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      message: commitMessage,
+      sha: existing.sha,
+      branch,
+    }),
+  });
+  if (!res.ok && res.status !== 404) {
+    const errText = await res.text();
+    throw new Error(`刪除 ${cleanPath} 失敗 (HTTP ${res.status}): ${errText.slice(0, 160)}`);
+  }
+}
+
+export async function deleteVaultNoteAndAssets(
+  settings: ByokSettings,
+  notePath: string,
+  noteId: string,
+  rawAssets: string[],
+  currentIndexPayload: import('./kbTypes').SearchIndexPayload | null
+): Promise<void> {
+  // 1. Delete the note markdown file
+  await deleteVaultFile(settings, notePath, `chore(kb): delete note ${noteId}`);
+
+  // 2. Delete associated assets (best-effort)
+  for (const raw of rawAssets) {
+    const clean = raw.replace(/^(\.\.\/)+/, '').replace(/^\/+/, '');
+    if (!clean || !clean.startsWith('assets/')) continue;
+    try {
+      await deleteVaultFile(settings, clean, `chore(kb): delete asset for ${noteId}`);
+    } catch {
+      // ignore missing asset
+    }
+  }
+
+  // 3. Update search-index.json immediately so 02 檢索 reflects deletion right away
+  if (currentIndexPayload) {
+    const nextNotes = currentIndexPayload.notes.filter((n) => n.id !== noteId);
+    const updatedIndex = {
+      ...currentIndexPayload,
+      total: nextNotes.length,
+      notes: nextNotes,
+    };
+    await putVaultFile(
+      settings,
+      'index/search-index.json',
+      utf8ToBase64(JSON.stringify(updatedIndex, null, 2) + '\n'),
+      `chore(index): remove ${noteId} from search-index.json`
+    );
+  }
+}

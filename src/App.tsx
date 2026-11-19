@@ -122,15 +122,13 @@ export const App: React.FC = () => {
           />
         </div>
 
-        {activeTab === 'ask' && (
-          <div key="ask" className={animClass}>
-            <AskView
-              settings={settings}
-              onOpenCitation={handleOpenCitation}
-              onGoSettings={() => switchTab('settings')}
-            />
-          </div>
-        )}
+        <div className={activeTab === 'ask' ? animClass : 'hidden'}>
+          <AskView
+            settings={settings}
+            onOpenCitation={handleOpenCitation}
+            onGoSettings={() => switchTab('settings')}
+          />
+        </div>
 
         {activeTab === 'settings' && (
           <div key="settings" className={animClass}>

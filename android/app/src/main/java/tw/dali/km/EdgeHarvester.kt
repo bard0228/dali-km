@@ -41,7 +41,7 @@ object EdgeHarvester {
     private const val OPENROUTER_MODEL = "openrouter/free"
     private const val DEFAULT_GEMINI_MODEL = "gemini-3.8-flash"
     private const val CHROME_UA =
-        "Mozilla/5.0 (Linux; Android 15; Pixel 10 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
     private val http = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
@@ -140,6 +140,7 @@ object EdgeHarvester {
         }
 
         val workDir = File(context.cacheDir, "harvester_${System.currentTimeMillis()}").apply { mkdirs() }
+        val startTimeMs = System.currentTimeMillis()
         try {
             checkCancelled(cancelled)
 
@@ -151,7 +152,7 @@ object EdgeHarvester {
                 .apply { timeZone = tz }
                 .format(now)
 
-            // 1. 3-Layer subtitle extraction: (A) Direct Watch HTML, (B) InnerTube Android API, (C) yt-dlp
+            // 1. 3-Layer subtitle extraction: (A) Direct Watch HTML, (B) InnerTube Android/iOS API, (C) yt-dlp
             var subtitleText = ""
             var scrapedTitle = ""
             val videoId = extractYoutubeVideoId(sourceUrl)
@@ -176,8 +177,12 @@ object EdgeHarvester {
 
             val structured: JSONObject
             var keyFrames = JSONArray()
+            val usedProvider: String
+            val usedModel: String
 
             if (subtitleText.isNotBlank()) {
+                usedProvider = if (aiProvider == "openrouter") "openrouter" else "gemini"
+                usedModel = if (aiProvider == "openrouter") OPENROUTER_MODEL else geminiModel
                 val engineLabel = if (aiProvider == "openrouter") {
                     "OpenRouter ($OPENROUTER_MODEL)"
                 } else {
@@ -209,6 +214,8 @@ object EdgeHarvester {
                 if (geminiKey.isBlank()) {
                     throw IllegalStateException("此影片無公開字幕，需使用 Gemini API 下載影片進行多模態分析，請先在「04 設定」填入 Gemini API Key。")
                 }
+                usedProvider = "gemini"
+                usedModel = geminiModel
                 onProgress("downloading", "此影片無公開字幕，改用手機端下載影片（<=480p）...")
                 ensureInitialized(context)
                 checkCancelled(cancelled)
@@ -253,6 +260,18 @@ object EdgeHarvester {
                 kf.remove("_local_path")
             }
 
+            val totalTokens = structured.optInt("_total_tokens", 0)
+            val tokenEstimated = structured.optBoolean("_token_estimated", totalTokens == 0)
+            structured.remove("_total_tokens")
+            structured.remove("_token_estimated")
+            val durationMs = (System.currentTimeMillis() - startTimeMs).coerceAtLeast(1L)
+            val executionStats = JSONObject()
+                .put("provider", usedProvider)
+                .put("model", usedModel)
+                .put("duration_ms", durationMs)
+                .put("total_tokens", totalTokens)
+                .put("token_estimated", tokenEstimated)
+
             val finalTitle = customTitle
                 .ifBlank { structured.optString("title", "") }
                 .ifBlank { oembedTitle }
@@ -271,7 +290,8 @@ object EdgeHarvester {
                 userSummary = userSummary,
                 createdAt = createdAt,
                 structured = structured,
-                keyFrames = keyFrames
+                keyFrames = keyFrames,
+                executionStats = executionStats
             )
 
             checkCancelled(cancelled)
@@ -344,35 +364,52 @@ object EdgeHarvester {
     }
 
     private fun tryFetchYoutubeCaptionsInnerTube(videoId: String, processId: String): Pair<String, String> {
-        return try {
-            val body = JSONObject()
-                .put("videoId", videoId)
-                .put(
-                    "context",
-                    JSONObject().put(
-                        "client",
-                        JSONObject()
-                            .put("clientName", "ANDROID")
-                            .put("clientVersion", "20.10.38")
-                            .put("hl", "zh-TW")
-                            .put("gl", "TW")
+        val clients = listOf(
+            Triple(
+                "ANDROID",
+                "20.10.38",
+                "com.google.android.youtube/20.10.38 (Linux; U; Android 15; zh_TW)"
+            ),
+            Triple(
+                "IOS",
+                "20.10.4",
+                "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_1 like Mac OS X)"
+            )
+        )
+        var fallbackTitle = ""
+        for ((clientName, clientVersion, userAgent) in clients) {
+            try {
+                val body = JSONObject()
+                    .put("videoId", videoId)
+                    .put(
+                        "context",
+                        JSONObject().put(
+                            "client",
+                            JSONObject()
+                                .put("clientName", clientName)
+                                .put("clientVersion", clientVersion)
+                                .put("hl", "zh-TW")
+                                .put("gl", "TW")
+                        )
                     )
-                )
-            val req = Request.Builder()
-                .url("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
-                .addHeader("User-Agent", "com.google.android.youtube/20.10.38 (Linux; U; Android 15; zh_TW)")
-                .addHeader("Content-Type", "application/json")
-                .tag(processId)
-                .post(body.toString().toRequestBody("application/json".toMediaType()))
-                .build()
-            val jsonStr = http.newCall(req).execute().use { resp ->
-                if (resp.isSuccessful) resp.body?.string() ?: "" else ""
+                val req = Request.Builder()
+                    .url("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
+                    .addHeader("User-Agent", userAgent)
+                    .addHeader("Content-Type", "application/json")
+                    .tag(processId)
+                    .post(body.toString().toRequestBody("application/json".toMediaType()))
+                    .build()
+                val jsonStr = http.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) resp.body?.string() ?: "" else ""
+                }
+                if (jsonStr.isBlank()) continue
+                val res = parseCaptionsFromPlayerJson(JSONObject(jsonStr), processId)
+                if (res.first.isNotBlank()) return res
+                if (fallbackTitle.isBlank() && res.second.isNotBlank()) fallbackTitle = res.second
+            } catch (_: Exception) {
             }
-            if (jsonStr.isBlank()) return Pair("", "")
-            parseCaptionsFromPlayerJson(JSONObject(jsonStr), processId)
-        } catch (_: Exception) {
-            Pair("", "")
         }
+        return Pair("", fallbackTitle)
     }
 
     private fun extractBalancedJsonAfterMarker(source: String, marker: String): JSONObject? {
@@ -662,11 +699,11 @@ object EdgeHarvester {
         } catch (_: Exception) {
             ""
         }
-        if ((code == 401 || code == 403 || code == 400) && trimmedKey.startsWith("AQ.")) {
-            return "$prefix HTTP $code：您填入的 `AQ.` 開頭金鑰屬於 Google Cloud Express 金鑰，AI Studio Gemini API (`generativelanguage.googleapis.com`) 不接受此格式。請至 https://aistudio.google.com/apikey 取得 `AIza` 開頭的免費 API Key 後重新儲存「04 設定」。"
+        if ((code == 401 || code == 403) && trimmedKey.startsWith("AQ.")) {
+            return "$prefix HTTP $code：您的 AQ. 開頭 Auth Key 未通過驗證。請確認該金鑰在 Google AI Studio / Cloud Console 未被限制僅供 Agent Platform 使用、未過期、且沒有複製到多餘空白；若仍失敗可於 AI Studio 檢查金鑰權限。"
         }
         if (code == 401) {
-            return "$prefix HTTP 401（金鑰驗證未通過）：${apiMsg.ifBlank { "請檢查「04 設定」的 Gemini API Key 是否為 aistudio.google.com/apikey 核發之 AIza 開頭金鑰，且前後無多餘空白。" }}"
+            return "$prefix HTTP 401（金鑰驗證未通過）：${apiMsg.ifBlank { "請檢查「04 設定」的 Gemini API Key 是否正確，且前後無多餘空白。" }}"
         }
         return "$prefix HTTP $code${if (apiMsg.isNotBlank()) "：$apiMsg" else ": ${body.take(200)}"}"
     }
@@ -709,14 +746,21 @@ object EdgeHarvester {
             if (!resp.isSuccessful) {
                 throw IllegalStateException(formatGeminiError("Gemini ($model) 分析失敗", resp.code, raw, key))
             }
-            val text = JSONObject(raw)
+            val root = JSONObject(raw)
+            val text = root
                 .getJSONArray("candidates")
                 .getJSONObject(0)
                 .getJSONObject("content")
                 .getJSONArray("parts")
                 .getJSONObject(0)
                 .getString("text")
-            return parseJsonLenient(text)
+            val parsed = parseJsonLenient(text)
+            val actualTokens = root.optJSONObject("usageMetadata")?.optInt("totalTokenCount", 0) ?: 0
+            val estimated = actualTokens <= 0
+            val tokens = if (!estimated) actualTokens else ((prompt.length + text.length) / 3).coerceAtLeast(1)
+            parsed.put("_total_tokens", tokens)
+            parsed.put("_token_estimated", estimated)
+            return parsed
         }
     }
 
@@ -753,12 +797,19 @@ object EdgeHarvester {
         http.newCall(req).execute().use { resp ->
             val raw = resp.body?.string() ?: ""
             if (!resp.isSuccessful) throw IllegalStateException("OpenRouter 分析失敗 HTTP ${resp.code}: ${raw.take(220)}")
-            val content = JSONObject(raw)
+            val root = JSONObject(raw)
+            val content = root
                 .getJSONArray("choices")
                 .getJSONObject(0)
                 .getJSONObject("message")
                 .getString("content")
-            return parseJsonLenient(content)
+            val parsed = parseJsonLenient(content)
+            val actualTokens = root.optJSONObject("usage")?.optInt("total_tokens", 0) ?: 0
+            val estimated = actualTokens <= 0
+            val tokens = if (!estimated) actualTokens else ((prompt.length + content.length) / 3).coerceAtLeast(1)
+            parsed.put("_total_tokens", tokens)
+            parsed.put("_token_estimated", estimated)
+            return parsed
         }
     }
 
@@ -911,14 +962,21 @@ object EdgeHarvester {
             if (!resp.isSuccessful) {
                 throw IllegalStateException(formatGeminiError("Gemini ($model) 分析失敗", resp.code, raw, key))
             }
-            val text = JSONObject(raw)
+            val root = JSONObject(raw)
+            val text = root
                 .getJSONArray("candidates")
                 .getJSONObject(0)
                 .getJSONObject("content")
                 .getJSONArray("parts")
                 .getJSONObject(0)
                 .getString("text")
-            return parseJsonLenient(text)
+            val parsed = parseJsonLenient(text)
+            val actualTokens = root.optJSONObject("usageMetadata")?.optInt("totalTokenCount", 0) ?: 0
+            val estimated = actualTokens <= 0
+            val tokens = if (!estimated) actualTokens else ((prompt.length + text.length) / 3).coerceAtLeast(1)
+            parsed.put("_total_tokens", tokens)
+            parsed.put("_token_estimated", estimated)
+            return parsed
         }
     }
 
@@ -1053,7 +1111,8 @@ object EdgeHarvester {
         userSummary: String,
         createdAt: String,
         structured: JSONObject,
-        keyFrames: JSONArray
+        keyFrames: JSONArray,
+        executionStats: JSONObject
     ): String {
         val tagsYaml = tags.joinToString("\n") { "- $it" }
         val assetsYaml = if (rawAssets.length() == 0) "[]" else {
@@ -1099,6 +1158,7 @@ object EdgeHarvester {
             .put("key_frames", keyFrames)
             .put("transcript", structured.optJSONArray("transcript") ?: JSONArray())
             .put("fact_check", JSONObject())
+            .put("execution_stats", executionStats)
 
         sb.append("\n<!-- DALI_STRUCTURED_JSON\n${payload.toString(2)}\n-->\n")
         return sb.toString()
