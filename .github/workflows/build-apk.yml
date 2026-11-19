@@ -33,9 +33,26 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
+      - name: Decode Release Keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/app/release.jks
+            echo "DALI_KEYSTORE_FILE=$GITHUB_WORKSPACE/android/app/release.jks" >> "$GITHUB_ENV"
+          fi
+
       - name: Build Release APK
         working-directory: android
+        env:
+          DALI_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          DALI_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          DALI_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: gradle assembleRelease --no-daemon
+
+      - name: Clean up Release Keystore
+        if: always()
+        run: rm -f android/app/release.jks
 
       - name: Rename APK with version
         run: |

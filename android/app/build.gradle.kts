@@ -11,18 +11,35 @@ android {
         applicationId = "tw.dali.km"
         minSdk = 26
         targetSdk = 35
-        versionCode = 205
-        versionName = "2.0.5"
+        versionCode = 206
+        versionName = "2.0.6"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a")
         }
     }
 
+    signingConfigs {
+        create("release") {
+            val ksPath = System.getenv("DALI_KEYSTORE_FILE")
+            if (!ksPath.isNullOrBlank() && file(ksPath).exists()) {
+                storeFile = file(ksPath)
+                storePassword = System.getenv("DALI_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("DALI_KEY_ALIAS")
+                keyPassword = System.getenv("DALI_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            val ksPath = System.getenv("DALI_KEYSTORE_FILE")
+            signingConfig = if (!ksPath.isNullOrBlank() && file(ksPath).exists()) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
         debug {
             isMinifyEnabled = false

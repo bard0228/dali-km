@@ -173,7 +173,7 @@ class MainActivity : AppCompatActivity() {
         fun isNativeApp(): Boolean = true
 
         @JavascriptInterface
-        fun getAppVersion(): String = "2.0.5"
+        fun getAppVersion(): String = "2.0.6"
 
         @JavascriptInterface
         fun readClipboardText(): String {
