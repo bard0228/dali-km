@@ -35,19 +35,39 @@ export const App: React.FC = () => {
     payload: FloatingProgressPayload | null;
   }>({ visible: false, exiting: false, payload: null });
   const [toastCollapsed, setToastCollapsed] = useState(false);
+  const [toastCollapsing, setToastCollapsing] = useState(false);
   const [titleAnimKey, setTitleAnimKey] = useState(0);
   const prevIdxRef = useRef(0);
   const tabHistoryRef = useRef<TabKey[]>([]);
   const browseBackRef = useRef<() => boolean>(() => false);
   const toastTimerRef = useRef<number | null>(null);
   const toastExitTimerRef = useRef<number | null>(null);
+  const toastCollapseTimerRef = useRef<number | null>(null);
   const toastTouchStartYRef = useRef<number | null>(null);
+
+  const collapseToastWithAnim = useCallback(() => {
+    if (toastCollapsing || toastCollapsed) return;
+    setToastCollapsing(true);
+    if (toastCollapseTimerRef.current) {
+      window.clearTimeout(toastCollapseTimerRef.current);
+    }
+    toastCollapseTimerRef.current = window.setTimeout(() => {
+      setToastCollapsed(true);
+      setToastCollapsing(false);
+      toastCollapseTimerRef.current = null;
+    }, 240);
+  }, [toastCollapsing, toastCollapsed]);
 
   const dismissFloatingToast = useCallback(() => {
     if (toastTimerRef.current) {
       window.clearTimeout(toastTimerRef.current);
       toastTimerRef.current = null;
     }
+    if (toastCollapseTimerRef.current) {
+      window.clearTimeout(toastCollapseTimerRef.current);
+      toastCollapseTimerRef.current = null;
+    }
+    setToastCollapsing(false);
     setFloatingToast((prev) => (prev.visible ? { ...prev, exiting: true } : prev));
     if (toastExitTimerRef.current) {
       window.clearTimeout(toastExitTimerRef.current);
@@ -69,12 +89,17 @@ export const App: React.FC = () => {
         window.clearTimeout(toastExitTimerRef.current);
         toastExitTimerRef.current = null;
       }
+      if (toastCollapseTimerRef.current) {
+        window.clearTimeout(toastCollapseTimerRef.current);
+        toastCollapseTimerRef.current = null;
+      }
       if (!payload) {
         dismissFloatingToast();
         return;
       }
       setFloatingToast((prev) => {
         if (!prev.visible || payload.kind === 'success' || payload.kind === 'error') {
+          setToastCollapsing(false);
           setToastCollapsed(false);
         }
         return { visible: true, exiting: false, payload };
@@ -96,6 +121,7 @@ export const App: React.FC = () => {
     return () => {
       if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
       if (toastExitTimerRef.current) window.clearTimeout(toastExitTimerRef.current);
+      if (toastCollapseTimerRef.current) window.clearTimeout(toastCollapseTimerRef.current);
     };
   }, []);
 
@@ -175,9 +201,14 @@ export const App: React.FC = () => {
                 type="button"
                 onClick={() => setToastCollapsed(false)}
                 onTouchStart={(e) => {
+                  e.stopPropagation();
                   toastTouchStartYRef.current = e.touches[0]?.clientY ?? null;
                 }}
+                onTouchMove={(e) => {
+                  e.stopPropagation();
+                }}
                 onTouchEnd={(e) => {
+                  e.stopPropagation();
                   const startY = toastTouchStartYRef.current;
                   const endY = e.changedTouches[0]?.clientY ?? null;
                   toastTouchStartYRef.current = null;
@@ -185,7 +216,7 @@ export const App: React.FC = () => {
                     setToastCollapsed(false);
                   }
                 }}
-                className="pointer-events-auto dj-glass-panel px-3 py-1 border border-t-0 border-[rgba(255,255,255,0.18)] flex items-center gap-1.5 text-[11px] text-[#6FA88B] shadow-lg"
+                className="pointer-events-auto touch-none dj-glass-panel dj-toast-enter px-3 py-1 border border-t-0 border-[rgba(255,255,255,0.18)] flex items-center gap-1.5 text-[11px] text-[#6FA88B] shadow-lg"
                 aria-label="展開進度通知"
               >
                 <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#6FA88B] animate-pulse" />
@@ -195,9 +226,14 @@ export const App: React.FC = () => {
           ) : (
             <div
               onTouchStart={(e) => {
+                e.stopPropagation();
                 toastTouchStartYRef.current = e.touches[0]?.clientY ?? null;
               }}
+              onTouchMove={(e) => {
+                e.stopPropagation();
+              }}
               onTouchEnd={(e) => {
+                e.stopPropagation();
                 const startY = toastTouchStartYRef.current;
                 const endY = e.changedTouches[0]?.clientY ?? null;
                 toastTouchStartYRef.current = null;
@@ -207,14 +243,14 @@ export const App: React.FC = () => {
                   endY !== null &&
                   endY - startY < -20
                 ) {
-                  setToastCollapsed(true);
+                  collapseToastWithAnim();
                 }
               }}
-              className={`max-w-[440px] mx-auto pointer-events-auto dj-glass-panel border-l-2 px-3.5 py-2.5 shadow-2xl flex items-start justify-between gap-2.5 ${
+              className={`max-w-[440px] mx-auto pointer-events-auto touch-none dj-glass-panel border-l-2 px-3.5 py-2.5 shadow-2xl flex items-start justify-between gap-2.5 ${
                 floatingToast.payload.kind === 'error'
                   ? 'border-l-[#D47A7A]'
                   : 'border-l-[#6FA88B]'
-              } ${floatingToast.exiting ? 'dj-toast-exit' : 'dj-toast-enter'}`}
+              } ${floatingToast.exiting || toastCollapsing ? 'dj-toast-exit' : 'dj-toast-enter'}`}
             >
               <div
                 className="min-w-0 flex-1"
@@ -249,7 +285,7 @@ export const App: React.FC = () => {
                 <div className="shrink-0 flex items-center gap-1.5">
                   <button
                     type="button"
-                    onClick={() => setToastCollapsed(true)}
+                    onClick={collapseToastWithAnim}
                     className="text-[11px] px-1.5 py-1 border border-[#252A2C] text-[#9A9E9C] hover:text-[#F4F4F0]"
                     aria-label="收合進度通知"
                   >
@@ -281,14 +317,14 @@ export const App: React.FC = () => {
       {/* Architectural Header */}
       <header className="safe-top px-5 pt-4 pb-4 border-b border-[rgba(255,255,255,0.14)]">
         <div className="flex items-center justify-between text-[11px] tracking-[0.18em] text-[#6E7371] dj-tnum mb-2">
-          <span>[ 0{activeIndex} ] KB VAULT</span>
+          <span>[ 0{activeIndex} ]</span>
           <span>0{activeIndex} | 04</span>
         </div>
         <h1 className="dj-font-display text-[28px] leading-[1.15] font-normal tracking-[0.04em] text-[#F4F4F0]">
           <MaskedText key={titleAnimKey} text="大里智慧王" />
         </h1>
         <p className="text-[11px] tracking-[0.14em] text-[#9A9E9C] uppercase mt-1">
-          MULTIMODAL PERSONAL KNOWLEDGE / BYOK
+          MULTIMODAL PERSONAL KNOWLEDGE
         </p>
       </header>
 

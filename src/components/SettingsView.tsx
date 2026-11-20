@@ -8,7 +8,6 @@ import {
   saveSettings,
   type ByokSettings,
 } from '../lib/storage';
-import { IconPhone } from './LineIcons';
 
 interface SettingsViewProps {
   settings: ByokSettings;
@@ -59,18 +58,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ settings, onChange }
 
   return (
     <section className="space-y-4">
-      <div className="dj-card p-3 text-xs text-[#9A9E9C] leading-relaxed space-y-1.5">
-        <div>
-          BYOK 零後端模式：所有金鑰僅存放於本機 <span className="text-[#F4F4F0]">localStorage</span>，直接透過 HTTPS 與 GitHub、Gemini 及 OpenRouter 通訊。
-        </div>
-        {isNative && (
-          <div className="flex items-center gap-1.5 text-[#6FA88B] font-medium">
-            <IconPhone className="w-3.5 h-3.5 shrink-0" />
-            <span>已啟動「大里智慧王 Android 原生擷取外殼」（系統分享／無字幕直讀／抖音攔截）。</span>
-          </div>
-        )}
-      </div>
-
       <form onSubmit={handleSave} className="space-y-3.5">
         <div>
           <label className="block text-[11px] tracking-[0.14em] text-[#9A9E9C] uppercase mb-1.5">
@@ -157,7 +144,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ settings, onChange }
 
         <div>
           <label className="block text-[11px] tracking-[0.14em] text-[#9A9E9C] uppercase mb-1.5">
-            GEMINI API KEY（免費額度：影音直讀、事實查核、多頁 OCR）
+            GEMINI API KEY
           </label>
           <input
             type="password"

@@ -347,12 +347,23 @@ object EdgeHarvester {
                     onProgress("downloading", "此影片無公開字幕，改用手機端下載影片（<=480p）...")
                     ensureInitialized(context)
                     checkCancelled(cancelled)
-                    val videoFile = try {
+                    var isAudioOnly = false
+                    var mediaFile = try {
                         downloadVideoWithYtDlp(sourceUrl, workDir, processId)
                     } catch (_: Exception) {
                         null
                     }
-                    if (videoFile == null) {
+                    if (mediaFile == null && !isIgUrl) {
+                        checkCancelled(cancelled)
+                        onProgress("downloading", "影片超過 45MB 或無適合畫質，改為下載純音訊進行語音分析...")
+                        mediaFile = try {
+                            downloadAudioWithYtDlp(sourceUrl, workDir, processId)
+                        } catch (_: Exception) {
+                            null
+                        }
+                        if (mediaFile != null) isAudioOnly = true
+                    }
+                    if (mediaFile == null) {
                         if (isIgUrl && igOgDesc.isNotBlank()) {
                             onProgress("gemini", "無法下載 IG 影片，改以貼文說明進行結構化分析...")
                             val igText = listOf(scrapedTitle, igOgDesc).filter { it.isNotBlank() }.joinToString("\n\n")
@@ -366,12 +377,16 @@ object EdgeHarvester {
                                 processId = processId
                             )
                         } else {
-                            throw IllegalStateException("無法下載影片，請確認連結是否有效或是否需要登入。")
+                            throw IllegalStateException("無法下載影片或音訊，請確認連結是否有效或是否需要登入。")
                         }
                     } else {
                         checkCancelled(cancelled)
-                        onProgress("gemini", "上傳影片至 Gemini ($geminiModel) 進行多模態聽覺+視覺分析...")
-                        val fileUri = uploadToGeminiFileApi(videoFile, geminiKey, processId, cancelled)
+                        onProgress(
+                            "gemini",
+                            if (isAudioOnly) "上傳音訊至 Gemini ($geminiModel) 進行語音結構化分析..."
+                            else "上傳影片至 Gemini ($geminiModel) 進行多模態聽覺+視覺分析..."
+                        )
+                        val fileUri = uploadToGeminiFileApi(mediaFile, geminiKey, processId, cancelled)
                         checkCancelled(cancelled)
                         val combinedSummary = if (igOgDesc.isNotBlank()) {
                             listOf("IG 貼文說明：$igOgDesc", userSummary).filter { it.isNotBlank() }.joinToString("\n")
@@ -388,9 +403,11 @@ object EdgeHarvester {
                         )
 
                         checkCancelled(cancelled)
-                        onProgress("keyframes", "依 AI 時間戳在本機擷取重點畫面...")
-                        val keyPoints = structured.optJSONArray("key_points") ?: JSONArray()
-                        keyFrames = extractKeyFrames(videoFile, keyPoints, workDir, noteId, monthDir)
+                        if (!isAudioOnly) {
+                            onProgress("keyframes", "依 AI 時間戳在本機擷取重點畫面...")
+                            val keyPoints = structured.optJSONArray("key_points") ?: JSONArray()
+                            keyFrames = extractKeyFrames(mediaFile, keyPoints, workDir, noteId, monthDir)
+                        }
                     }
                 }
             }
@@ -995,6 +1012,25 @@ object EdgeHarvester {
         }
     }
 
+    private fun downloadAudioWithYtDlp(url: String, outDir: File, processId: String): File? {
+        val req = YoutubeDLRequest(url).apply {
+            addOption("--no-playlist")
+            addOption("--no-cache-dir")
+            addOption("--retries", "3")
+            addOption("--socket-timeout", "20")
+            addOption("--js-runtimes", "quickjs")
+            addOption("--extractor-args", "youtube:player_client=tv,ios,android")
+            addOption("-f", "worstaudio[ext=m4a]/bestaudio[ext=m4a]/bestaudio")
+            addOption("--max-filesize", "120M")
+            addOption("-o", File(outDir, "audio.%(ext)s").absolutePath)
+        }
+        YoutubeDL.getInstance().execute(req, processId, null)
+        return outDir.listFiles()?.firstOrNull {
+            it.isFile && it.name.startsWith("audio.") && it.length() > 1024 &&
+                it.extension.lowercase() in setOf("m4a", "mp3", "webm", "opus", "ogg")
+        }
+    }
+
     private fun buildTextAnalysisPrompt(
         transcriptText: String,
         titleHint: String,
@@ -1166,7 +1202,13 @@ object EdgeHarvester {
         cancelled: AtomicBoolean
     ): String {
         val key = apiKey.trim()
-        val mime = if (file.extension.equals("m4a", true)) "audio/mp4" else "video/mp4"
+        val mime = when (file.extension.lowercase(Locale.US)) {
+            "m4a" -> "audio/mp4"
+            "mp3" -> "audio/mpeg"
+            "webm" -> if (file.name.startsWith("audio.")) "audio/webm" else "video/webm"
+            "opus", "ogg" -> "audio/ogg"
+            else -> "video/mp4"
+        }
         val startBody = JSONObject().put("file", JSONObject().put("display_name", file.name)).toString()
         val startReq = Request.Builder()
             .url("https://generativelanguage.googleapis.com/upload/v1beta/files")
