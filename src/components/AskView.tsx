@@ -47,10 +47,7 @@ export const AskView: React.FC<AskViewProps> = ({
   const [question, setQuestion] = useState('');
   const [asking, setAsking] = useState(false);
   const [history, setHistory] = useState<AskHistoryItem[]>(() => loadAskHistory());
-  const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>(() => {
-    const init = loadAskHistory();
-    return init[0] ? { [init[0].id]: true } : {};
-  });
+  const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
   const [deleteTarget, setDeleteTarget] = useState<AskHistoryItem | null>(null);
   const [error, setError] = useState<string | null>(null);
 
